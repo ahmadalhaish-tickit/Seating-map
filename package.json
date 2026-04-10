@@ -1,0 +1,12 @@
+{
+  "name": "tickit",
+  "private": true,
+  "workspaces": ["packages/*"],
+  "scripts": {
+    "dev": "concurrently \"npm run dev -w packages/server\" \"npm run dev -w packages/client\"",
+    "db:migrate": "npm run migrate -w packages/server"
+  },
+  "devDependencies": {
+    "concurrently": "^8.2.0"
+  }
+}

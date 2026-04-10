@@ -1,0 +1,12 @@
+fastapi
+uvicorn[standard]
+psd-tools
+pillow
+python-multipart
+pydantic
+ezdxf
+anthropic
+matplotlib
+python-dotenv
+opencv-python-headless
+numpy

@@ -1,0 +1,187 @@
+// prisma/schema.prisma
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+model Venue {
+  id        String   @id @default(cuid())
+  name      String
+  slug      String   @unique
+  address   String?
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+  maps      VenueMap[]
+}
+
+model VenueMap {
+  id           String   @id @default(cuid())
+  venueId      String
+  name         String
+  svgViewBox   String   @default("0 0 1200 800")
+  bgImageUrl   String?
+  isPublished  Boolean  @default(false)
+  createdAt    DateTime @default(now())
+  updatedAt    DateTime @updatedAt
+  venue        Venue         @relation(fields: [venueId], references: [id], onDelete: Cascade)
+  sections     Section[]
+  pricingZones PricingZone[]
+  events       Event[]
+  mapHolds     MapHold[]
+}
+
+model Section {
+  id           String      @id @default(cuid())
+  mapId        String
+  name         String
+  label        String
+  sectionType  SectionType @default(RESERVED)
+  polygonPath  String
+  notes        String?
+  sortOrder    Int         @default(0)
+  createdAt    DateTime    @default(now())
+  updatedAt    DateTime    @updatedAt
+  map          VenueMap    @relation(fields: [mapId], references: [id], onDelete: Cascade)
+  rows         Row[]
+  zoneMappings SectionZoneMapping[]
+}
+
+enum SectionType {
+  RESERVED
+  GA
+  ACCESSIBLE
+  RESTRICTED
+  TABLE
+  STAGE
+  BAR
+  BATHROOM
+  DANCING
+  PARKING
+  STAIRS
+  WALL
+  DOOR
+  CHECKIN
+  TEXT
+}
+
+model Row {
+  id        String   @id @default(cuid())
+  sectionId String
+  label     String
+  sortOrder Int      @default(0)
+  startX    Float
+  startY    Float
+  angle     Float    @default(0)
+  curve     Float    @default(0)
+  skew      Float    @default(0)
+  createdAt DateTime @default(now())
+  section   Section  @relation(fields: [sectionId], references: [id], onDelete: Cascade)
+  seats     Seat[]
+}
+
+model Seat {
+  id           String  @id @default(cuid())
+  rowId        String
+  seatNumber   String
+  x            Float
+  y            Float
+  isAccessible Boolean @default(false)
+  isObstructed Boolean @default(false)
+  notes        String?
+  row          Row     @relation(fields: [rowId], references: [id], onDelete: Cascade)
+  inventory    SeatInventory[]
+  heldIn       HeldSeat[]
+}
+
+model MapHold {
+  id        String     @id @default(cuid())
+  mapId     String
+  name      String
+  color     String     @default("#888888")
+  createdAt DateTime   @default(now())
+  map       VenueMap   @relation(fields: [mapId], references: [id], onDelete: Cascade)
+  seats     HeldSeat[]
+}
+
+model HeldSeat {
+  id     String  @id @default(cuid())
+  holdId String
+  seatId String
+  hold   MapHold @relation(fields: [holdId], references: [id], onDelete: Cascade)
+  seat   Seat    @relation(fields: [seatId], references: [id], onDelete: Cascade)
+  @@unique([holdId, seatId])
+}
+
+model PricingZone {
+  id              String  @id @default(cuid())
+  mapId           String
+  name            String
+  color           String
+  sortOrder       Int     @default(0)
+  map             VenueMap @relation(fields: [mapId], references: [id], onDelete: Cascade)
+  sectionMappings SectionZoneMapping[]
+  ticketTypes     TicketType[]
+}
+
+model SectionZoneMapping {
+  id        String      @id @default(cuid())
+  sectionId String
+  zoneId    String
+  section   Section     @relation(fields: [sectionId], references: [id], onDelete: Cascade)
+  zone      PricingZone @relation(fields: [zoneId], references: [id], onDelete: Cascade)
+  @@unique([sectionId, zoneId])
+}
+
+model Event {
+  id          String   @id @default(cuid())
+  mapId       String
+  name        String
+  date        DateTime
+  doorsOpen   DateTime?
+  isActive    Boolean  @default(false)
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+  map         VenueMap       @relation(fields: [mapId], references: [id], onDelete: Cascade)
+  ticketTypes TicketType[]
+  inventory   SeatInventory[]
+}
+
+model TicketType {
+  id          String @id @default(cuid())
+  eventId     String
+  zoneId      String
+  name        String
+  price       Int
+  currency    String @default("AED")
+  maxPerOrder Int    @default(8)
+  available   Int
+  event       Event       @relation(fields: [eventId], references: [id], onDelete: Cascade)
+  zone        PricingZone @relation(fields: [zoneId], references: [id], onDelete: Cascade)
+}
+
+model SeatInventory {
+  id      String     @id @default(cuid())
+  eventId String
+  seatId  String
+  status  SeatStatus @default(AVAILABLE)
+  heldBy  String?
+  heldAt  DateTime?
+  orderId String?
+  event   Event @relation(fields: [eventId], references: [id], onDelete: Cascade)
+  seat    Seat  @relation(fields: [seatId], references: [id], onDelete: Cascade)
+  @@unique([eventId, seatId])
+  @@index([eventId, status])
+}
+
+enum SeatStatus {
+  AVAILABLE
+  HELD
+  RESERVED
+  SOLD
+  BLOCKED
+}

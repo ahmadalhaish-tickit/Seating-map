@@ -1,0 +1,84 @@
+{
+  "version": 1,
+  "comment": "Rules are checked highest-priority first. First rule whose ALL conditions match wins. train.py rewrites this file from training_data.jsonl.",
+  "rules": [
+    {
+      "type": "STAGE",
+      "priority": 10,
+      "conditions": {
+        "cy_pct_max": 0.35,
+        "area_pct_min": 0.04
+      }
+    },
+    {
+      "type": "CHECKIN",
+      "priority": 9,
+      "conditions": {
+        "cy_pct_min": 0.72,
+        "area_pct_min": 0.015
+      }
+    },
+    {
+      "type": "PARKING",
+      "priority": 8,
+      "conditions": {
+        "cy_pct_min": 0.68,
+        "area_pct_min": 0.05
+      }
+    },
+    {
+      "type": "GA",
+      "priority": 7,
+      "conditions": {
+        "area_pct_min": 0.07,
+        "solidity_min": 0.78
+      }
+    },
+    {
+      "type": "BAR",
+      "priority": 6,
+      "conditions": {
+        "aspect_ratio_min": 2.2,
+        "area_pct_max": 0.08
+      }
+    },
+    {
+      "type": "DANCING",
+      "priority": 5,
+      "conditions": {
+        "solidity_max": 0.80,
+        "area_pct_min": 0.02
+      }
+    },
+    {
+      "type": "BATHROOM",
+      "priority": 4,
+      "conditions": {
+        "area_pct_max": 0.03,
+        "solidity_min": 0.85
+      }
+    },
+    {
+      "type": "STAIRS",
+      "priority": 3,
+      "conditions": {
+        "area_pct_max": 0.022
+      }
+    },
+    {
+      "type": "DOOR",
+      "priority": 2,
+      "conditions": {
+        "area_pct_max": 0.009,
+        "aspect_ratio_min": 1.8
+      }
+    },
+    {
+      "type": "RESERVED",
+      "priority": 1,
+      "conditions": {
+        "area_pct_min": 0.015
+      }
+    }
+  ]
+}
