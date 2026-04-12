@@ -173,6 +173,123 @@ app.patch("/api/sections/:sectionId/move", ah(async (req, res) => {
   res.json({ ok: true });
 }));
 
+// Split: move a subset of seats into a brand-new section in the same map
+app.post("/api/sections/:sectionId/split", ah(async (req, res) => {
+  const { seatIds } = req.body as { seatIds: string[] };
+  if (!seatIds || seatIds.length === 0) return err(res, 400, "seatIds required");
+  const source = await prisma.section.findUnique({
+    where: { id: req.params.sectionId },
+    include: { rows: { include: { seats: true } }, zoneMappings: true },
+  });
+  if (!source) return err(res, 404, "Section not found");
+
+  const seatSet = new Set(seatIds);
+  const allSeats = source.rows.flatMap(r => r.seats);
+  const toMove = allSeats.filter(s => seatSet.has(s.id));
+  if (toMove.length === 0) return err(res, 400, "No matching seats");
+
+  // Compute new polygon from moved-seats bounding box
+  const xs = toMove.map(s => s.x), ys = toMove.map(s => s.y);
+  const pad = 20;
+  const minX = Math.min(...xs) - pad, maxX = Math.max(...xs) + pad;
+  const minY = Math.min(...ys) - pad, maxY = Math.max(...ys) + pad;
+  const newPolygon = `M ${minX} ${minY} L ${maxX} ${minY} L ${maxX} ${maxY} L ${minX} ${maxY} Z`;
+
+  const existingCount = await prisma.section.count({ where: { mapId: source.mapId } });
+  const newSec = await prisma.section.create({
+    data: {
+      mapId: source.mapId,
+      name: `${source.name} B`,
+      label: source.label.slice(0, 5) + "B",
+      sectionType: source.sectionType,
+      polygonPath: newPolygon,
+      sortOrder: existingCount,
+      ...(source.zoneMappings[0] ? { zoneMappings: { create: { zoneId: source.zoneMappings[0].zoneId } } } : {}),
+    },
+  });
+
+  // Group toMove seats by their original row label, create matching rows in new section
+  const rowByLabel = new Map<string, typeof toMove>();
+  for (const seat of toMove) {
+    const row = source.rows.find(r => r.id === seat.rowId);
+    const label = row?.label ?? "A";
+    if (!rowByLabel.has(label)) rowByLabel.set(label, []);
+    rowByLabel.get(label)!.push(seat);
+  }
+  for (const [label, seats] of rowByLabel) {
+    const newRow = await prisma.row.create({
+      data: { sectionId: newSec.id, label, startX: seats[0].x, startY: seats[0].y },
+    });
+    // Re-assign each seat to the new row
+    for (const seat of seats) {
+      await prisma.seat.update({ where: { id: seat.id }, data: { rowId: newRow.id } });
+    }
+  }
+
+  // Clean up empty rows in source section
+  const emptyRows = await prisma.row.findMany({
+    where: { sectionId: req.params.sectionId },
+    include: { _count: { select: { seats: true } } },
+  });
+  for (const row of emptyRows) {
+    if (row._count.seats === 0) await prisma.row.delete({ where: { id: row.id } });
+  }
+
+  res.status(201).json({ ok: true, newSectionId: newSec.id });
+}));
+
+// Merge: combine rows/seats of multiple sections into the first one, delete the rest
+app.post("/api/maps/:mapId/merge", ah(async (req, res) => {
+  const { sectionIds } = req.body as { sectionIds: string[] };
+  if (!sectionIds || sectionIds.length < 2) return err(res, 400, "Need at least 2 sectionIds");
+
+  const [primaryId, ...otherIds] = sectionIds;
+  const primary = await prisma.section.findUnique({
+    where: { id: primaryId },
+    include: { rows: { include: { seats: true } } },
+  });
+  if (!primary) return err(res, 404, "Primary section not found");
+
+  // Re-assign all rows from secondary sections to primary
+  for (const otherId of otherIds) {
+    const other = await prisma.section.findUnique({
+      where: { id: otherId },
+      include: { rows: { include: { seats: true } } },
+    });
+    if (!other) continue;
+    for (const row of other.rows) {
+      await prisma.row.update({ where: { id: row.id }, data: { sectionId: primaryId } });
+    }
+    // Delete the now-empty section (zone mappings etc.)
+    const remainingRows = await prisma.row.findMany({ where: { sectionId: otherId }, select: { id: true } });
+    if (remainingRows.length === 0) {
+      await prisma.$transaction([
+        prisma.sectionZoneMapping.deleteMany({ where: { sectionId: otherId } }),
+        prisma.section.delete({ where: { id: otherId } }),
+      ]);
+    }
+  }
+
+  // Recompute polygon to wrap all remaining seats
+  const updatedRows = await prisma.row.findMany({
+    where: { sectionId: primaryId },
+    include: { seats: true },
+  });
+  const allSeats = updatedRows.flatMap(r => r.seats);
+  if (allSeats.length > 0) {
+    const xs = allSeats.map(s => s.x), ys = allSeats.map(s => s.y);
+    const pad = 20;
+    const poly = `M ${Math.min(...xs)-pad} ${Math.min(...ys)-pad} L ${Math.max(...xs)+pad} ${Math.min(...ys)-pad} L ${Math.max(...xs)+pad} ${Math.max(...ys)+pad} L ${Math.min(...xs)-pad} ${Math.max(...ys)+pad} Z`;
+    await prisma.section.update({ where: { id: primaryId }, data: { polygonPath: poly } });
+  }
+
+  const merged = await prisma.section.findUnique({
+    where: { id: primaryId },
+    include: { rows: { include: { seats: true } }, zoneMappings: true },
+  });
+  res.json(merged);
+}));
+
 // ── PSD Analyzer ──────────────────────────────────────────────────────────
 
 const upload = multer({ storage: multer.memoryStorage(), limits: { fileSize: 50 * 1024 * 1024 } });

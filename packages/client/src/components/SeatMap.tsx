@@ -97,49 +97,50 @@ function labelFontSize(text: string, bbox: ReturnType<typeof pathBBox>, max = 14
   return Math.max(min, Math.min(max, availW / Math.max(1, text.length * 0.58), availH));
 }
 
-// ── Table geometry ─────────────────────────────────────────────────────────
-function rotateAround(pts: Point[], cx: number, cy: number, angleDeg: number): Point[] {
-  if (angleDeg === 0) return pts;
-  const r = (angleDeg * Math.PI) / 180;
-  const cos = Math.cos(r), sin = Math.sin(r);
-  return pts.map(p => ({
-    x: cx + (p.x - cx) * cos - (p.y - cy) * sin,
-    y: cy + (p.x - cx) * sin + (p.y - cy) * cos,
-  }));
-}
-function computeChairPositions(meta: TableMeta, cx: number, cy: number): Point[] {
-  const { shape, w, h, cpl, cps } = meta;
-  const GAP = 14;
-  const hw = w / 2, hh = h / 2;
-  const pts: Point[] = [];
-  if (shape === "round" || shape === "oval") {
-    const count = Math.max(1, cpl);
-    const rx = (shape === "oval" ? hw : Math.min(hw, hh)) + GAP;
-    const ry = (shape === "oval" ? hh : Math.min(hw, hh)) + GAP;
-    for (let i = 0; i < count; i++) {
-      const a = (i / count) * Math.PI * 2 - Math.PI / 2;
-      pts.push({ x: cx + rx * Math.cos(a), y: cy + ry * Math.sin(a) });
-    }
-  } else if (shape === "booth") {
-    const stepL = w / (cpl + 1);
-    for (let i = 1; i <= cpl; i++) pts.push({ x: cx - hw + i * stepL, y: cy - hh - GAP });
-    for (let i = 1; i <= cpl; i++) pts.push({ x: cx + hw - i * stepL, y: cy + hh + GAP });
-  } else {
-    const s = shape === "square" ? Math.min(hw, hh) : hw;
-    const t = shape === "square" ? Math.min(hw, hh) : hh;
-    const stepL = (s * 2) / (cpl + 1);
-    const stepS = (t * 2) / (cps + 1);
-    for (let i = 1; i <= cpl; i++) {
-      pts.push({ x: cx - s + i * stepL, y: cy - t - GAP });
-      pts.push({ x: cx + s - i * stepL, y: cy + t + GAP });
-    }
-    for (let i = 1; i <= cps; i++) {
-      pts.push({ x: cx - s - GAP, y: cy - t + i * stepS });
-      pts.push({ x: cx + s + GAP, y: cy + t - i * stepS });
-    }
+// Returns true if the proposed add/remove action would leave an isolated available seat in the row.
+// Only MIDDLE seats (those with a real neighbour on both sides) can be orphaned.
+// End-of-row seats are never orphans: a single available seat at the start or end of a row
+// is still accessible and won't block future buyers.
+function wouldCreateOrphan(
+  seatId: string,
+  action: "add" | "remove",
+  row: Row,
+  currentSelected: Set<string>,
+  inventory: SeatInventory,
+  holdMap: Map<string, { id: string }>
+): boolean {
+  if (row.seats.length < 3) return false; // need ≥3 seats for a middle orphan to exist
+  // Sort by seat number (numeric) so adjacency reflects physical order
+  const sorted = [...row.seats].sort((a, b) => {
+    const na = parseInt(a.seatNumber), nb = parseInt(b.seatNumber);
+    if (!isNaN(na) && !isNaN(nb)) return na - nb;
+    return a.x - b.x;
+  });
+  const simSelected = new Set(currentSelected);
+  if (action === "add") simSelected.add(seatId);
+  else simSelected.delete(seatId);
+  const isTaken = (s: Seat): boolean => {
+    // The seat being released must be treated as available regardless of inventory:
+    // inventory[seatId] is still "HELD" until the server processes the release,
+    // so without this carve-out the seat would appear taken and the orphan check would skip it.
+    if (action === "remove" && s.id === seatId) return false;
+    return (
+      simSelected.has(s.id) ||
+      holdMap.has(s.id) ||
+      (inventory[s.id] !== undefined && inventory[s.id] !== "AVAILABLE")
+    );
+  };
+  // Only iterate over seats that have a real left AND right neighbour (skip first and last)
+  for (let i = 1; i < sorted.length - 1; i++) {
+    if (isTaken(sorted[i])) continue; // seat is already taken — not an orphan candidate
+    if (isTaken(sorted[i - 1]) && isTaken(sorted[i + 1])) return true;
   }
-  return rotateAround(pts, cx, cy, meta.angle);
+  return false;
 }
+
+// ── Table geometry ─────────────────────────────────────────────────────────
+
+
 function tableBodyPath(meta: TableMeta, cx: number, cy: number): string {
   const { shape, w, h } = meta;
   const hw = (shape === "square" ? Math.min(w, h) : w) / 2;
@@ -294,8 +295,16 @@ export default function SeatMap({ mapId, eventId, sessionId, onSelectionChange }
   useEffect(() => { gaSelectionsRef.current = gaSelections; }, [gaSelections]);
   const [expandedSections, setExpandedSections] = useState<Set<string>>(new Set());
   const [transform, setTransform] = useState({ x: 0, y: 0, scale: 1 });
+  const [toast, setToast] = useState<{ msg: string; type: "warn" | "error" } | null>(null);
+  const toastTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const containerRef = useRef<HTMLDivElement>(null);
   const socketRef    = useRef<Socket | null>(null);
+
+  const showToast = useCallback((msg: string, type: "warn" | "error" = "warn") => {
+    if (toastTimerRef.current) clearTimeout(toastTimerRef.current);
+    setToast({ msg, type });
+    toastTimerRef.current = setTimeout(() => setToast(null), 3200);
+  }, []);
 
   const zoneForSection = useCallback((s: Section) =>
     mapData?.pricingZones.find(z => z.id === s.zoneMappings[0]?.zoneId),
@@ -313,6 +322,16 @@ export default function SeatMap({ mapId, eventId, sessionId, onSelectionChange }
         }
         m.set(seat.id, perSeatZid ?? sectionZid);
       }
+    }
+    return m;
+  }, [mapData]);
+
+  // sectionId → noOrphanSeats flag
+  const noOrphanMap = useMemo(() => {
+    const m = new Map<string, boolean>();
+    for (const s of mapData?.sections ?? []) {
+      if (!s.notes) continue;
+      try { const p = JSON.parse(s.notes); if (p.noOrphanSeats) m.set(s.id, true); } catch {}
     }
     return m;
   }, [mapData]);
@@ -399,7 +418,17 @@ export default function SeatMap({ mapId, eventId, sessionId, onSelectionChange }
     if (seatZoneMap.get(seat.id) === undefined) return;  // no zone assigned → not purchasable
     const status = inventory[seat.id] ?? "AVAILABLE";
     if (status === "SOLD" || status === "BLOCKED") return;
+    // Find the section + row for orphan check
+    const seatSection = mapData?.sections.find(s => s.rows.some(r => r.seats.some(st => st.id === seat.id)));
+    const seatRow = seatSection?.rows.find(r => r.seats.some(st => st.id === seat.id));
     if (selected.has(seat.id)) {
+      // Deselect: check if removing this seat would orphan another
+      if (seatSection && seatRow && noOrphanMap.get(seatSection.id)) {
+        if (wouldCreateOrphan(seat.id, "remove", seatRow, selected, inventory, seatHoldMap)) {
+          showToast("Deselecting this seat would leave an isolated seat with no available neighbours.");
+          return;
+        }
+      }
       setSelected(p => { const s = new Set(p); s.delete(seat.id); onSelectionChange?.([...s]); return s; });
       socketRef.current?.emit("seat:release", { eventId, seatId: seat.id });
       return;
@@ -408,7 +437,18 @@ export default function SeatMap({ mapId, eventId, sessionId, onSelectionChange }
     // Zone restriction: block if seat is from a different zone than current selection
     if (lockedZoneIdRef.current !== undefined) {
       const seatZone = seatZoneMap.get(seat.id);
-      if (seatZone !== lockedZoneIdRef.current) return;
+      if (seatZone !== lockedZoneIdRef.current) {
+        const lockedZone = mapData?.pricingZones.find(z => z.id === lockedZoneIdRef.current);
+        showToast(`You can only select seats from the same zone. Your current selection is in "${lockedZone?.name ?? "a different zone"}".`);
+        return;
+      }
+    }
+    // No-orphan check: block selection if it would isolate a neighbour
+    if (seatSection && seatRow && noOrphanMap.get(seatSection.id)) {
+      if (wouldCreateOrphan(seat.id, "add", seatRow, selected, inventory, seatHoldMap)) {
+        showToast("Selecting this seat would leave an isolated seat with no available neighbours.");
+        return;
+      }
     }
     socketRef.current?.emit("seat:hold", { eventId, seatId: seat.id },
       (res: { ok: boolean }) => {
@@ -417,7 +457,7 @@ export default function SeatMap({ mapId, eventId, sessionId, onSelectionChange }
           onSelectionChange?.([...s]); return s;
         });
       });
-  }, [inventory, selected, eventId, onSelectionChange, seatZoneMap]);
+  }, [inventory, selected, eventId, onSelectionChange, seatZoneMap, noOrphanMap, seatHoldMap, mapData, showToast]);
 
   const handleTableClick = useCallback(async (section: Section, seat: Seat, allSeats: Seat[], meta: TableMeta, e: React.MouseEvent) => {
     e.stopPropagation();
@@ -463,6 +503,7 @@ export default function SeatMap({ mapId, eventId, sessionId, onSelectionChange }
 
   return (
     <div ref={containerRef} style={{ width:"100%", height:"100%", overflow:"hidden", position:"relative", cursor:"grab", touchAction:"none" }}>
+      <style>{`@keyframes fadeInDown{from{opacity:0;transform:translate(-50%,-8px)}to{opacity:1;transform:translate(-50%,0)}}`}</style>
       <svg viewBox={mapData.svgViewBox} width={vw} height={vh} overflow="visible" style={{
         position:"absolute",
         transform:`translate(${transform.x}px,${transform.y}px) scale(${transform.scale})`,
@@ -736,7 +777,11 @@ export default function SeatMap({ mapId, eventId, sessionId, onSelectionChange }
                       onClick={e => {
                         e.stopPropagation();
                         // Zone restriction: block GA from different zone
-                        if (lockedZoneIdRef.current !== undefined && zone?.id !== lockedZoneIdRef.current) return;
+                        if (lockedZoneIdRef.current !== undefined && zone?.id !== lockedZoneIdRef.current) {
+                          const lockedZone = mapData.pricingZones.find(z2 => z2.id === lockedZoneIdRef.current);
+                          showToast(`You can only select seats from the same zone. Your current selection is in "${lockedZone?.name ?? "a different zone"}".`);
+                          return;
+                        }
                         setHoveredGA(null);
                         setGaPopup({ sectionId: section.id, sectionName: section.name, capacity, maxPerOrder, zoneName: zone?.name, zoneColor: zone?.color, qty: gaSelections[section.id] ?? 1, x: e.clientX, y: e.clientY });
                       }} />
@@ -922,6 +967,22 @@ export default function SeatMap({ mapId, eventId, sessionId, onSelectionChange }
               <span style={{ color:"#aaa" }}>{hoveredGA.zoneName}</span>
             </div>
           )}
+        </div>
+      )}
+
+      {/* Toast notification */}
+      {toast && (
+        <div style={{
+          position: "absolute", top: 16, left: "50%", transform: "translateX(-50%)",
+          background: "#1a1a2e", border: `1px solid ${toast.type === "error" ? "#D85A30" : "#BA7517"}`,
+          borderRadius: 10, padding: "10px 18px",
+          fontSize: 13, color: "#eee", zIndex: 50, maxWidth: "70vw",
+          boxShadow: "0 4px 20px rgba(0,0,0,0.45)",
+          display: "flex", alignItems: "center", gap: 10, pointerEvents: "none",
+          animation: "fadeInDown 0.18s ease",
+        }}>
+          <span style={{ fontSize: 16, flexShrink: 0 }}>{toast.type === "error" ? "✕" : "⚠"}</span>
+          <span>{toast.msg}</span>
         </div>
       )}
 
