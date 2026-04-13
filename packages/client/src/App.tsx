@@ -14,15 +14,41 @@ interface MapInfo {
 
 export default function App() {
   const sessionId = useSession()
+
+  // ── Token-based customer access ────────────────────────────────────────
+  const [urlToken] = useState(() => new URLSearchParams(window.location.search).get('token'))
+  const [tokenState, setTokenState] = useState<'checking' | 'valid' | 'expired' | 'invalid'>(
+    urlToken ? 'checking' : 'invalid'
+  )
+  const [tokenMapId,   setTokenMapId]   = useState('')
+  const [tokenEventId, setTokenEventId] = useState('')
+
+  useEffect(() => {
+    if (!urlToken) return
+    fetch(`/api/auth/verify?token=${encodeURIComponent(urlToken)}`)
+      .then(async r => {
+        const d = await r.json()
+        if (r.ok) {
+          setTokenMapId(d.mapId)
+          setTokenEventId(d.eventId ?? '')
+          setTokenState('valid')
+        } else {
+          setTokenState(d.error?.includes('expired') ? 'expired' : 'invalid')
+        }
+      })
+      .catch(() => setTokenState('invalid'))
+  }, [urlToken])
+
+  // ── Admin UI state (only active when no token) ─────────────────────────
   const [view, setView]               = useState<'map' | 'admin'>('map')
   const [maps, setMaps]               = useState<MapInfo[]>([])
   const [selectedMapId, setSelectedMapId]     = useState('')
   const [selectedEventId, setSelectedEventId] = useState('')
   const [loading, setLoading]         = useState(true)
-
   const [serverError, setServerError] = useState(false)
 
   useEffect(() => {
+    if (urlToken) { setLoading(false); return }
     fetch('/api/maps')
       .then(r => { if (!r.ok) throw new Error(String(r.status)); return r.json(); })
       .then((data: MapInfo[]) => {
@@ -34,7 +60,7 @@ export default function App() {
       })
       .catch(() => setServerError(true))
       .finally(() => setLoading(false))
-  }, [])
+  }, [urlToken])
 
   const selectedMap = maps.find(m => m.id === selectedMapId)
 
@@ -57,6 +83,33 @@ export default function App() {
     background: '#1a1a1a', color: '#fff', border: '1px solid #444', cursor: 'pointer',
   }
 
+  // ── Token-based customer view ──────────────────────────────────────────
+  if (urlToken) {
+    const centered: React.CSSProperties = {
+      height: '100vh', display: 'flex', alignItems: 'center', justifyContent: 'center',
+      background: '#111', color: '#888', fontSize: 15, flexDirection: 'column', gap: 10,
+    }
+    if (tokenState === 'checking')
+      return <div style={centered}>Verifying access…</div>
+    if (tokenState === 'expired')
+      return (
+        <div style={centered}>
+          <div style={{ color: '#ccc' }}>This link has expired.</div>
+          <div style={{ fontSize: 13 }}>Please request a new link from the event organiser.</div>
+        </div>
+      )
+    if (tokenState === 'invalid')
+      return <div style={centered}>Invalid or unrecognised link.</div>
+    if (!tokenEventId)
+      return <div style={centered}>This link has no event attached.</div>
+    return (
+      <div style={{ height: '100vh', background: '#111' }}>
+        <SeatMap mapId={tokenMapId} eventId={tokenEventId} sessionId={sessionId} />
+      </div>
+    )
+  }
+
+  // ── Admin view ─────────────────────────────────────────────────────────
   return (
     <div style={{ height: '100vh', display: 'flex', flexDirection: 'column', background: '#111', color: '#fff' }}>
       <nav style={{
@@ -91,18 +144,12 @@ export default function App() {
             Loading…
           </div>
         ) : serverError ? (
-          <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'center', height: '100%', flexDirection: 'column', gap: 12, color: '#888' }}>
-            <div style={{ fontSize: 15 }}>Cannot reach the server.</div>
-            <code style={{ background: '#1a1a1a', padding: '8px 16px', borderRadius: 6, fontSize: 13, color: '#aaa' }}>
-              npm run dev
-            </code>
+          <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'center', height: '100%', color: '#888', fontSize: 15 }}>
+            Cannot reach the server.
           </div>
         ) : !selectedMapId ? (
-          <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'center', height: '100%', flexDirection: 'column', gap: 12, color: '#666' }}>
-            <div style={{ fontSize: 15 }}>No maps found. Run the seed to create demo data:</div>
-            <code style={{ background: '#1a1a1a', padding: '8px 16px', borderRadius: 6, fontSize: 13, color: '#aaa' }}>
-              cd packages/server && npm run seed
-            </code>
+          <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'center', height: '100%', color: '#666', fontSize: 15 }}>
+            No maps found.
           </div>
         ) : view === 'map' ? (
           selectedEventId

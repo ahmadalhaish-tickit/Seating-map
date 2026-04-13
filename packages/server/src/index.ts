@@ -5,6 +5,7 @@ import cors from "cors";
 import multer from "multer";
 import { PrismaClient, SeatStatus } from "@prisma/client";
 import { z } from "zod";
+import jwt from "jsonwebtoken";
 
 const app = express();
 const httpServer = createServer(app);
@@ -13,6 +14,7 @@ const io = new IOServer(httpServer, {
 });
 const prisma = new PrismaClient();
 const HOLD_DURATION_MS = 8 * 60 * 1000;
+const JWT_SECRET = process.env.JWT_SECRET || "dev-secret-change-in-production";
 
 app.use(cors({ origin: process.env.CLIENT_URL || "http://localhost:5173" }));
 app.use(express.json({ limit: "10mb" }));
@@ -68,6 +70,33 @@ const CreateZoneSchema = z.object({
   name: z.string(),
   color: z.string().regex(/^#[0-9a-fA-F]{6}$/),
   sortOrder: z.number().int().optional(),
+});
+
+// ── Auth ──────────────────────────────────────────────────────────────────
+// POST /api/auth/token — create a signed 1-hour access token for a map/event
+app.post("/api/auth/token", ah(async (req, res) => {
+  const { mapId, eventId } = req.body as { mapId?: string; eventId?: string };
+  if (!mapId) return err(res, 400, "mapId required");
+  const map = await prisma.venueMap.findUnique({ where: { id: mapId }, select: { id: true } });
+  if (!map) return err(res, 404, "Map not found");
+  const payload: { mapId: string; eventId?: string } = { mapId };
+  if (eventId) payload.eventId = eventId;
+  const token = jwt.sign(payload, JWT_SECRET, { expiresIn: "1h" });
+  res.json({ token });
+}));
+
+// GET /api/auth/verify?token=... — verify a token and return its claims
+app.get("/api/auth/verify", (req, res) => {
+  const token = req.query.token as string;
+  if (!token) return err(res, 400, "token required");
+  try {
+    const payload = jwt.verify(token, JWT_SECRET) as { mapId: string; eventId?: string };
+    res.json({ mapId: payload.mapId, eventId: payload.eventId ?? null });
+  } catch (e: unknown) {
+    if (e instanceof Error && e.name === "TokenExpiredError")
+      return err(res, 401, "Token has expired");
+    return err(res, 401, "Invalid token");
+  }
 });
 
 // ── Venues ────────────────────────────────────────────────────────────────

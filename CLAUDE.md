@@ -41,7 +41,8 @@ seating-test1/
 │   │   │   ├── index.css
 │   │   │   └── components/
 │   │   │       ├── SeatMap.tsx    # Customer-facing seat map renderer
-│   │   │       └── MapEditor.tsx  # Admin polygon-draw map builder
+│   │   │       └── MapEditor.tsx  # Thin wrapper — provides MapEditorContext
+│   │   │       └── mapeditor/     # All MapEditor sub-components (see below)
 │   │   ├── index.html
 │   │   ├── vite.config.ts         # proxies /api -> localhost:3001
 │   │   ├── tsconfig.json
@@ -52,16 +53,48 @@ seating-test1/
 
 ---
 
+## MapEditor architecture
+
+MapEditor.tsx is now a thin wrapper (~20 lines). All state and logic lives in sub-modules:
+
+```
+components/mapeditor/
+├── types.tsx              # All types, constants, and pure helper functions
+├── styles.ts              # Shared CSS style constants (inp, pbtn, sbtn, dbtn, zbtn)
+├── useMapEditorState.ts   # Custom hook — all state, refs, effects, handlers (~2400 lines)
+├── MapEditorContext.tsx   # React Context wrapping useMapEditorState return type
+├── Sidebar.tsx            # <aside> shell — tab bar, focus banner, renders sub-panels
+├── CanvasSVG.tsx          # Full SVG canvas — all section type renderers, zoom controls
+├── SidebarFocusTools.tsx  # Seat style, curve/skew sliders, bake transforms
+├── SidebarEditorTools.tsx # Tool buttons (Select/Table/Object/Text/GA/Seated), file imports
+├── SidebarInspectors.tsx  # Section, table, text, venue object inspectors + row generator
+├── SidebarHoldsTab.tsx    # Holds management tab
+├── ZonesPanel.tsx         # Pricing zones list + new zone form
+├── CanvasOverlays.tsx     # Floating popups: seat rename, row edit, table popup, text widget
+└── ImportModal.tsx        # PSD/DXF/Image import preview modal
+```
+
+**Pattern:** Every sub-component calls `useMapEditorContext()` — no props passed down. `MapEditor.tsx` only instantiates the hook, wraps with `<MapEditorContext.Provider>`, and renders `<Sidebar>`, `<CanvasSVG>`, and `<ImportModal>`.
+
+**Wheel zoom:** React's `onWheel` is passive since React 17 (can't call `preventDefault`). The hook attaches a native `addEventListener("wheel", fn, { passive: false })` in a `useEffect` instead.
+
+**Per-seat zone color:** Stored in `seat.notes` as JSON `{"s":"shape","z":"zoneId"}`. On the canvas, `dominantPerSeatZone` (most seats) colors the polygon fill; a small dot palette shows unique zones in the section without expanding it.
+
+**Seat zone enforcement (SeatMap):** Seats with no pricing zone assigned cannot be selected in the customer-facing map view.
+
+---
+
 ## Data model (Prisma)
 
 ```
 Venue
  └── VenueMap          (svgViewBox, bgImageUrl, isPublished)
-      ├── Section[]     (polygonPath, sectionType: RESERVED|GA|ACCESSIBLE|RESTRICTED)
+      ├── Section[]     (polygonPath, sectionType: RESERVED|GA|ACCESSIBLE|RESTRICTED|TABLE|TEXT|STAGE|BAR|…)
       │    └── Row[]
-      │         └── Seat[]   (x, y, seatNumber, isAccessible, isObstructed)
+      │         └── Seat[]   (x, y, seatNumber, notes: JSON with shape + zoneId)
       ├── PricingZone[] (name, color hex, sortOrder)
       │    └── SectionZoneMapping (many-to-many Section <-> Zone)
+      ├── MapHold[]     (name, color — blocks seats for organizer holds)
       └── Event[]
            ├── TicketType[] (price in cents, currency, maxPerOrder)
            └── SeatInventory[]  (status: AVAILABLE|HELD|RESERVED|SOLD|BLOCKED)
@@ -75,17 +108,23 @@ Venue
 |---|---|---|
 | GET | /api/venues | List all venues |
 | POST | /api/venues | Create venue |
-| GET | /api/maps/:id | Full map with sections, rows, seats, zones |
+| GET | /api/maps/:id | Full map with sections, rows, seats, zones, holds |
 | POST | /api/venues/:id/maps | Create map for venue |
 | PATCH | /api/maps/:id/publish | Toggle isPublished |
 | POST | /api/maps/:id/sections | Create section |
 | PATCH | /api/sections/:id | Update section |
 | DELETE | /api/sections/:id | Delete section |
+| PATCH | /api/sections/:id/rotate | Rotate polygon + all seat positions |
+| PATCH | /api/sections/:id/move | Bulk-move polygon + seats by delta |
 | POST | /api/sections/:id/rows | Create row + seats |
 | GET | /api/maps/:id/zones | List pricing zones |
 | POST | /api/maps/:id/zones | Create pricing zone |
 | PUT | /api/sections/:id/zone | Assign zone to section |
 | GET | /api/events/:id/inventory | Compact {seatId: status} snapshot |
+| POST | /api/maps/:id/analyze-psd | Proxy PSD to Python analyzer |
+| POST | /api/maps/:id/analyze-dxf | Proxy DXF/DWG to Python analyzer |
+| POST | /api/maps/:id/analyze-image | Proxy PNG/JPEG to Python analyzer |
+| POST | /api/maps/:id/import-sections | Bulk-create sections from analyzer result |
 
 ---
 
@@ -117,7 +156,7 @@ Hold expiry sweep runs every 30s on the server.
 <SeatMap
   mapId="cuid..."
   eventId="cuid..."
-  sessionId="uuid..."          // from useSession hook (see below)
+  sessionId="uuid..."          // from useSession hook
   onSelectionChange={(ids) => {}}
 />
 ```
@@ -130,6 +169,8 @@ Seat colours:
 | HELD (other) | #BA7517 amber |
 | RESERVED | #D85A30 coral |
 | SOLD / BLOCKED | #888780 gray |
+
+Seats with no pricing zone assigned are **not selectable**.
 
 ---
 
@@ -144,8 +185,8 @@ Seat colours:
 />
 ```
 
-Tools: Select | Draw polygon. Section inspector: name, label, type, zone.
-Row generator: fills RESERVED section with auto-positioned seat circles.
+Tools: Select | Table | Object | Text | GA Section | Seated
+Section types: RESERVED, GA, ACCESSIBLE, RESTRICTED, TABLE, TEXT, STAGE, BAR, BATHROOM, DANCING, PARKING, STAIRS, WALL, DOOR, CHECKIN
 
 ---
 
@@ -153,9 +194,10 @@ Row generator: fills RESERVED section with auto-positioned seat circles.
 
 ### packages/server/.env
 ```
-DATABASE_URL="postgresql://postgres:postgres@localhost:5432/tickit_seating_test1"
+DATABASE_URL="postgresql://ahmadalhaich@localhost:5432/tickit"
 CLIENT_URL="http://localhost:5173"
 PORT=3001
+ANALYZER_URL=http://127.0.0.1:8001
 ```
 
 ### packages/client/.env
@@ -168,9 +210,12 @@ VITE_API_URL=http://localhost:3001
 ## Dev commands
 
 ```bash
-# Run client + server together
+# Run client + server together (from repo root)
 cd ~/Desktop/TICKIT/seating-test1
 npm run dev
+
+# Server only
+cd packages/server && npm run dev
 
 # First-time DB setup
 cd packages/server
@@ -190,42 +235,37 @@ URLs:
 
 ---
 
+## Git remote
+
+`https://github.com/ahmadalhaish-tickit/Seating-map.git` — full monorepo pushed to `main`.
+
+---
+
 ## What to build next
 
-### 1. useSession hook (do first)
-Create `packages/client/src/hooks/useSession.ts`
-
-```ts
-import { useState } from "react"
-export function useSession() {
-  const [id] = useState(() => {
-    let s = sessionStorage.getItem("tickit_session")
-    if (!s) { s = crypto.randomUUID(); sessionStorage.setItem("tickit_session", s) }
-    return s
-  })
-  return id
-}
-```
-
-### 2. CheckoutPanel component
+### 1. CheckoutPanel component
 - Receives selected seat IDs from SeatMap onSelectionChange
 - Fetches ticket prices from GET /api/events/:id/ticket-types
 - Shows seat list + total price + "Proceed to payment" CTA
 - Releases all holds on abandon
 
-### 3. HoldTimer component
+### 2. HoldTimer component
 - Counts down 8:00 from first seat hold
 - Warns at 2:00 remaining
 - Auto-releases all held seats on expiry
 
-### 4. Event + seed routes
+### 3. Event + seed routes
 - POST /api/events
 - POST /api/events/:id/ticket-types
 - `packages/server/prisma/seed.ts` — test venue + map + event + inventory
 
-### 5. Shared types
+### 4. Shared types
 Move SeatStatus, SeatInventory, FullMap types from SeatMap.tsx into
 `packages/shared/src/types.ts` and import in both server and client.
+
+### 5. Python analyzer (local image pipeline)
+Plan exists at `/Users/ahmadalhaich/.claude/plans/wild-herding-dolphin.md`.
+Local OpenCV + K-means + rules pipeline so image analysis works without Claude API key.
 
 ---
 
@@ -236,3 +276,4 @@ Move SeatStatus, SeatInventory, FullMap types from SeatMap.tsx into
 - SeatMap.tsx imports Prisma types directly — move to shared package
 - No React error boundaries yet
 - Test pinch-zoom on a real mobile device for touch-action conflicts
+- `useSession` hook already built (`packages/client/src/hooks/useSession.ts`)
