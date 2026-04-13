@@ -16,23 +16,40 @@ model Venue {
   address   String?
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
-  maps      VenueMap[]
+  events    Event[]
+}
+
+model Event {
+  id          String    @id @default(cuid())
+  venueId     String?
+  venue       Venue?    @relation(fields: [venueId], references: [id], onDelete: SetNull)
+  name        String
+  date        DateTime?
+  doorsOpen   DateTime?
+  isActive    Boolean   @default(false)
+  createdAt   DateTime  @default(now())
+  updatedAt   DateTime  @updatedAt
+  maps        VenueMap[]
+  ticketTypes TicketType[]
+  inventory   SeatInventory[]
 }
 
 model VenueMap {
-  id           String   @id @default(cuid())
-  venueId      String
-  name         String
-  svgViewBox   String   @default("0 0 1200 800")
-  bgImageUrl   String?
-  isPublished  Boolean  @default(false)
-  createdAt    DateTime @default(now())
-  updatedAt    DateTime @updatedAt
-  venue        Venue         @relation(fields: [venueId], references: [id], onDelete: Cascade)
-  sections     Section[]
-  pricingZones PricingZone[]
-  events       Event[]
-  mapHolds     MapHold[]
+  id               String    @id @default(cuid())
+  eventId          String
+  event            Event     @relation(fields: [eventId], references: [id], onDelete: Cascade)
+  name             String
+  mapSlot          Int       @default(1)
+  svgViewBox       String    @default("0 0 1200 800")
+  bgImageUrl       String?
+  isPublished      Boolean   @default(false)
+  scheduledStartAt DateTime?
+  scheduledEndAt   DateTime?
+  createdAt        DateTime  @default(now())
+  updatedAt        DateTime  @updatedAt
+  sections         Section[]
+  pricingZones     PricingZone[]
+  mapHolds         MapHold[]
 }
 
 model Section {
@@ -135,20 +152,6 @@ model SectionZoneMapping {
   section   Section     @relation(fields: [sectionId], references: [id], onDelete: Cascade)
   zone      PricingZone @relation(fields: [zoneId], references: [id], onDelete: Cascade)
   @@unique([sectionId, zoneId])
-}
-
-model Event {
-  id          String   @id @default(cuid())
-  mapId       String
-  name        String
-  date        DateTime
-  doorsOpen   DateTime?
-  isActive    Boolean  @default(false)
-  createdAt   DateTime @default(now())
-  updatedAt   DateTime @updatedAt
-  map         VenueMap       @relation(fields: [mapId], references: [id], onDelete: Cascade)
-  ticketTypes TicketType[]
-  inventory   SeatInventory[]
 }
 
 model TicketType {

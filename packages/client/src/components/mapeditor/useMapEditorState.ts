@@ -77,6 +77,13 @@ export function useMapEditorState({ mapId, svgViewBox, bgImageUrl, initialZones 
     screenX: number; screenY: number;
   } | null>(null);
 
+  // Map / event metadata loaded alongside sections
+  const [mapMeta, setMapMeta] = useState<{
+    eventId: string; eventName: string; mapSlot: number;
+    scheduledStartAt: string | null; scheduledEndAt: string | null;
+    isPublished: boolean;
+  }>({ eventId: '', eventName: '', mapSlot: 1, scheduledStartAt: null, scheduledEndAt: null, isPublished: false });
+
   // Refs
   const containerRef     = useRef<HTMLDivElement>(null);
   const transformRef     = useRef(transform);
@@ -197,6 +204,12 @@ export function useMapEditorState({ mapId, svgViewBox, bgImageUrl, initialZones 
     fetch(`/api/maps/${mapId}`)
       .then(r => r.json())
       .then((map: {
+        id: string;
+        mapSlot: number;
+        isPublished: boolean;
+        scheduledStartAt: string | null;
+        scheduledEndAt: string | null;
+        event?: { id: string; name: string };
         sections: {
           id: string; name: string; label: string;
           sectionType: DraftSection["sectionType"];
@@ -352,6 +365,14 @@ export function useMapEditorState({ mapId, svgViewBox, bgImageUrl, initialZones 
         }));
         if (map.pricingZones.length > 0) setZones(map.pricingZones);
         if (map.mapHolds) setHolds(map.mapHolds);
+        setMapMeta({
+          eventId:          map.event?.id   ?? '',
+          eventName:        map.event?.name ?? '',
+          mapSlot:          map.mapSlot      ?? 1,
+          scheduledStartAt: map.scheduledStartAt ?? null,
+          scheduledEndAt:   map.scheduledEndAt   ?? null,
+          isPublished:      map.isPublished  ?? false,
+        });
       });
   }, [mapId]);
 
@@ -2461,6 +2482,27 @@ export function useMapEditorState({ mapId, svgViewBox, bgImageUrl, initialZones 
     }
   };
 
+  const saveSchedule = async (patch: {
+    scheduledStartAt?: string | null;
+    scheduledEndAt?:   string | null;
+    isPublished?: boolean;
+  }) => {
+    const r = await fetch(`/api/maps/${mapId}/schedule`, {
+      method: "PATCH",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(patch),
+    });
+    if (r.ok) {
+      const updated = await r.json();
+      setMapMeta(prev => ({
+        ...prev,
+        scheduledStartAt: updated.scheduledStartAt ?? null,
+        scheduledEndAt:   updated.scheduledEndAt   ?? null,
+        isPublished:      updated.isPublished,
+      }));
+    }
+  };
+
   const canvasCursor = (seatDragState.current || sectionDragState.current) ? "grabbing" : (tool === "polygon" || tool === "table" || tool === "object" || tool === "text") ? "crosshair" : "grab";
 
   return {
@@ -2581,5 +2623,7 @@ export function useMapEditorState({ mapId, svgViewBox, bgImageUrl, initialZones 
     handleFileImport,
     handleImportConfirm,
     canvasCursor,
+    mapMeta, setMapMeta,
+    saveSchedule,
   };
 }

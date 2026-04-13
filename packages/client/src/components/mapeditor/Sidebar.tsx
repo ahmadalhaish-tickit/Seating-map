@@ -5,6 +5,7 @@ import SidebarEditorTools from "./SidebarEditorTools.tsx";
 import { SidebarInspectors } from "./SidebarInspectors.tsx";
 import { ZonesPanel } from "./ZonesPanel.tsx";
 import { SidebarHoldsTab } from "./SidebarHoldsTab.tsx";
+import { SidebarEventPanel } from "./SidebarEventPanel.tsx";
 
 export default function Sidebar() {
   const {
@@ -20,10 +21,10 @@ export default function Sidebar() {
 
       {/* Tab bar */}
       <div style={{ display: "flex", borderBottom: "1px solid #333", flexShrink: 0 }}>
-        {(["editor", "holds"] as const).map(tab => (
-          <button key={tab} onClick={() => setSidebarTab(tab)}
-            style={{ flex: 1, padding: "10px 0", border: "none", borderBottom: sidebarTab === tab ? "2px solid #534AB7" : "2px solid transparent", background: "transparent", color: sidebarTab === tab ? "#a09ce8" : "#666", fontSize: 13, fontWeight: sidebarTab === tab ? 600 : 400, cursor: "pointer", textTransform: "capitalize" }}>
-            {tab === "holds" ? `Holds${holds.length ? ` (${holds.length})` : ""}` : "Editor"}
+        {(["editor", "holds", "event"] as const).map(tab => (
+          <button key={tab} onClick={() => setSidebarTab(tab as "editor" | "holds")}
+            style={{ flex: 1, padding: "10px 0", border: "none", borderBottom: sidebarTab === tab ? "2px solid #534AB7" : "2px solid transparent", background: "transparent", color: sidebarTab === tab ? "#a09ce8" : "#666", fontSize: 12, fontWeight: sidebarTab === tab ? 600 : 400, cursor: "pointer", textTransform: "capitalize" }}>
+            {tab === "holds" ? `Holds${holds.length ? ` (${holds.length})` : ""}` : tab === "event" ? "Schedule" : "Editor"}
           </button>
         ))}
       </div>
@@ -60,6 +61,8 @@ export default function Sidebar() {
       </>}
 
       {sidebarTab === "holds" && <SidebarHoldsTab />}
+
+      {(sidebarTab as string) === "event" && <SidebarEventPanel />}
 
     </aside>
   );

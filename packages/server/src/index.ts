@@ -52,12 +52,6 @@ const CreateVenueSchema = z.object({
   slug: z.string().min(1).regex(/^[a-z0-9-]+$/),
   address: z.string().optional(),
 });
-const CreateMapSchema = z.object({
-  venueId: z.string(),
-  name: z.string().min(1),
-  svgViewBox: z.string().optional(),
-  bgImageUrl: z.string().url().optional(),
-});
 const UpsertSectionSchema = z.object({
   name: z.string(),
   label: z.string(),
@@ -73,15 +67,13 @@ const CreateZoneSchema = z.object({
 });
 
 // ── Auth ──────────────────────────────────────────────────────────────────
-// POST /api/auth/token — create a signed 1-hour access token for a map/event
+// POST /api/auth/token — create a signed 1-hour access token for an event
 app.post("/api/auth/token", ah(async (req, res) => {
-  const { mapId, eventId } = req.body as { mapId?: string; eventId?: string };
-  if (!mapId) return err(res, 400, "mapId required");
-  const map = await prisma.venueMap.findUnique({ where: { id: mapId }, select: { id: true } });
-  if (!map) return err(res, 404, "Map not found");
-  const payload: { mapId: string; eventId?: string } = { mapId };
-  if (eventId) payload.eventId = eventId;
-  const token = jwt.sign(payload, JWT_SECRET, { expiresIn: "1h" });
+  const { eventId } = req.body as { eventId?: string };
+  if (!eventId) return err(res, 400, "eventId required");
+  const event = await prisma.event.findUnique({ where: { id: eventId }, select: { id: true } });
+  if (!event) return err(res, 404, "Event not found");
+  const token = jwt.sign({ eventId }, JWT_SECRET, { expiresIn: "1h" });
   res.json({ token });
 }));
 
@@ -90,14 +82,32 @@ app.get("/api/auth/verify", (req, res) => {
   const token = req.query.token as string;
   if (!token) return err(res, 400, "token required");
   try {
-    const payload = jwt.verify(token, JWT_SECRET) as { mapId: string; eventId?: string };
-    res.json({ mapId: payload.mapId, eventId: payload.eventId ?? null });
+    const payload = jwt.verify(token, JWT_SECRET) as { eventId: string };
+    res.json({ eventId: payload.eventId });
   } catch (e: unknown) {
     if (e instanceof Error && e.name === "TokenExpiredError")
       return err(res, 401, "Token has expired");
     return err(res, 401, "Invalid token");
   }
 });
+
+// ── Active-map resolver ───────────────────────────────────────────────────
+function resolveActiveMap(maps: { id: string; mapSlot: number; isPublished: boolean; scheduledStartAt: Date | null; scheduledEndAt: Date | null }[]) {
+  if (maps.length === 0) return null;
+  const now = new Date();
+  // Published map whose schedule window covers now
+  const scheduled = maps.filter(m => m.isPublished).find(m => {
+    const started = !m.scheduledStartAt || m.scheduledStartAt <= now;
+    const notEnded = !m.scheduledEndAt || m.scheduledEndAt > now;
+    return started && notEnded;
+  });
+  if (scheduled) return scheduled;
+  // First published map (no schedule constraints)
+  const firstPublished = maps.filter(m => m.isPublished).sort((a, b) => a.mapSlot - b.mapSlot)[0];
+  if (firstPublished) return firstPublished;
+  // Final fallback: lowest slot regardless of publish status
+  return [...maps].sort((a, b) => a.mapSlot - b.mapSlot)[0];
+}
 
 // ── Venues ────────────────────────────────────────────────────────────────
 app.get("/api/venues", ah(async (_req, res) => {
@@ -110,22 +120,91 @@ app.post("/api/venues", ah(async (req, res) => {
   catch { err(res, 409, "Slug already exists"); }
 }));
 
-// ── Maps ──────────────────────────────────────────────────────────────────
-app.get("/api/maps", ah(async (_req, res) => {
-  const maps = await prisma.venueMap.findMany({
+// ── Events ────────────────────────────────────────────────────────────────
+const CreateEventSchema = z.object({
+  name: z.string().min(1),
+  venueId: z.string().optional(),
+  date: z.string().datetime({ offset: true }).optional(),
+});
+
+app.get("/api/events", ah(async (_req, res) => {
+  res.json(await prisma.event.findMany({
     include: {
       venue: { select: { name: true } },
-      events: { select: { id: true, name: true, date: true }, orderBy: { date: "asc" } },
-      pricingZones: { select: { id: true, name: true, color: true }, orderBy: { sortOrder: "asc" } },
+      maps: {
+        select: { id: true, name: true, mapSlot: true, svgViewBox: true,
+                  scheduledStartAt: true, scheduledEndAt: true, isPublished: true,
+                  pricingZones: { select: { id: true, name: true, color: true }, orderBy: { sortOrder: "asc" } } },
+        orderBy: { mapSlot: "asc" },
+      },
     },
     orderBy: { createdAt: "asc" },
-  });
-  res.json(maps);
+  }));
 }));
+
+app.post("/api/events", ah(async (req, res) => {
+  const p = CreateEventSchema.safeParse(req.body);
+  if (!p.success) return err(res, 400, p.error.message);
+  res.status(201).json(await prisma.event.create({
+    data: { name: p.data.name, venueId: p.data.venueId ?? null, date: p.data.date ? new Date(p.data.date) : null },
+    include: {
+      venue: { select: { name: true } },
+      maps: { select: { id: true, name: true, mapSlot: true, svgViewBox: true,
+                        scheduledStartAt: true, scheduledEndAt: true, isPublished: true,
+                        pricingZones: { select: { id: true, name: true, color: true } } },
+              orderBy: { mapSlot: "asc" } },
+    },
+  }));
+}));
+
+// GET active map for an event (full map data — same shape as GET /api/maps/:id)
+app.get("/api/events/:eventId/active-map", ah(async (req, res) => {
+  const maps = await prisma.venueMap.findMany({
+    where: { eventId: req.params.eventId },
+    orderBy: { mapSlot: "asc" },
+  });
+  if (maps.length === 0) return err(res, 404, "No maps for this event");
+  const active = resolveActiveMap(maps);
+  if (!active) return err(res, 404, "No active map");
+  const map = await prisma.venueMap.findUnique({
+    where: { id: active.id },
+    include: {
+      event: { select: { id: true, name: true, venue: { select: { name: true } } } },
+      sections: { include: { rows: { include: { seats: true } }, zoneMappings: true }, orderBy: { sortOrder: "asc" } },
+      pricingZones: { orderBy: { sortOrder: "asc" } },
+      mapHolds: { include: { seats: { select: { seatId: true } } }, orderBy: { createdAt: "asc" } },
+    },
+  });
+  res.json(map);
+}));
+
+// Create a map slot under an event (max 3)
+const CreateMapForEventSchema = z.object({
+  name: z.string().min(1),
+  mapSlot: z.number().int().min(1).max(3).default(1),
+  svgViewBox: z.string().optional(),
+});
+
+app.post("/api/events/:eventId/maps", ah(async (req, res) => {
+  const p = CreateMapForEventSchema.safeParse(req.body);
+  if (!p.success) return err(res, 400, p.error.message);
+  const existing = await prisma.venueMap.count({ where: { eventId: req.params.eventId } });
+  if (existing >= 3) return err(res, 400, "An event can have at most 3 maps");
+  const slotTaken = await prisma.venueMap.findFirst({
+    where: { eventId: req.params.eventId, mapSlot: p.data.mapSlot }, select: { id: true },
+  });
+  if (slotTaken) return err(res, 400, `Map slot ${p.data.mapSlot} is already taken`);
+  res.status(201).json(await prisma.venueMap.create({
+    data: { eventId: req.params.eventId, name: p.data.name, mapSlot: p.data.mapSlot, svgViewBox: p.data.svgViewBox ?? "0 0 1200 800" },
+  }));
+}));
+
+// ── Maps ──────────────────────────────────────────────────────────────────
 app.get("/api/maps/:mapId", ah(async (req, res) => {
   const map = await prisma.venueMap.findUnique({
     where: { id: req.params.mapId },
     include: {
+      event: { select: { id: true, name: true, venue: { select: { name: true } } } },
       sections: { include: { rows: { include: { seats: true } }, zoneMappings: true }, orderBy: { sortOrder: "asc" } },
       pricingZones: { orderBy: { sortOrder: "asc" } },
       mapHolds: { include: { seats: { select: { seatId: true } } }, orderBy: { createdAt: "asc" } },
@@ -134,16 +213,25 @@ app.get("/api/maps/:mapId", ah(async (req, res) => {
   if (!map) return err(res, 404, "Map not found");
   res.json(map);
 }));
-app.post("/api/venues/:venueId/maps", ah(async (req, res) => {
-  const p = CreateMapSchema.safeParse({ ...req.body, venueId: req.params.venueId });
-  if (!p.success) return err(res, 400, p.error.message);
-  res.status(201).json(await prisma.venueMap.create({ data: p.data }));
-}));
+
 app.patch("/api/maps/:mapId/publish", ah(async (req, res) => {
   res.json(await prisma.venueMap.update({
     where: { id: req.params.mapId },
     data: { isPublished: req.body.isPublished ?? true },
   }));
+}));
+
+// Update map schedule (start/end times + published flag)
+app.patch("/api/maps/:mapId/schedule", ah(async (req, res) => {
+  const { scheduledStartAt, scheduledEndAt, isPublished } = req.body as {
+    scheduledStartAt?: string | null; scheduledEndAt?: string | null; isPublished?: boolean;
+  };
+  const data: Record<string, unknown> = {};
+  if (scheduledStartAt !== undefined) data.scheduledStartAt = scheduledStartAt ? new Date(scheduledStartAt) : null;
+  if (scheduledEndAt   !== undefined) data.scheduledEndAt   = scheduledEndAt   ? new Date(scheduledEndAt)   : null;
+  if (isPublished      !== undefined) data.isPublished = isPublished;
+  if (Object.keys(data).length === 0) return err(res, 400, "Nothing to update");
+  res.json(await prisma.venueMap.update({ where: { id: req.params.mapId }, data }));
 }));
 
 // ── Sections ──────────────────────────────────────────────────────────────

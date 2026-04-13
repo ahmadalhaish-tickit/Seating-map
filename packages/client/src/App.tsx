@@ -3,13 +3,16 @@ import SeatMap from './components/SeatMap'
 import MapEditor from './components/MapEditor'
 import { useSession } from './hooks/useSession'
 
-interface EventInfo   { id: string; name: string; date: string }
-interface ZoneInfo    { id: string; name: string; color: string }
-interface MapInfo {
-  id: string; name: string; svgViewBox: string
-  venue: { name: string }
-  events: EventInfo[]
-  pricingZones: ZoneInfo[]
+interface MapSlot {
+  id: string; name: string; mapSlot: number; svgViewBox: string
+  scheduledStartAt: string | null; scheduledEndAt: string | null
+  isPublished: boolean
+  pricingZones: { id: string; name: string; color: string }[]
+}
+interface EventData {
+  id: string; name: string; date: string | null
+  venue: { name: string } | null
+  maps: MapSlot[]
 }
 
 export default function App() {
@@ -20,67 +23,109 @@ export default function App() {
   const [tokenState, setTokenState] = useState<'checking' | 'valid' | 'expired' | 'invalid'>(
     urlToken ? 'checking' : 'invalid'
   )
-  const [tokenMapId,   setTokenMapId]   = useState('')
   const [tokenEventId, setTokenEventId] = useState('')
+  const [tokenMapId,   setTokenMapId]   = useState('')
 
   useEffect(() => {
     if (!urlToken) return
     fetch(`/api/auth/verify?token=${encodeURIComponent(urlToken)}`)
       .then(async r => {
         const d = await r.json()
-        if (r.ok) {
-          setTokenMapId(d.mapId)
-          setTokenEventId(d.eventId ?? '')
-          setTokenState('valid')
-        } else {
-          setTokenState(d.error?.includes('expired') ? 'expired' : 'invalid')
-        }
+        if (!r.ok) { setTokenState(d.error?.includes('expired') ? 'expired' : 'invalid'); return }
+        // Resolve active map for this event
+        const eid = d.eventId as string
+        const mr = await fetch(`/api/events/${eid}/active-map`)
+        if (!mr.ok) { setTokenState('invalid'); return }
+        const map = await mr.json()
+        setTokenEventId(eid)
+        setTokenMapId(map.id)
+        setTokenState('valid')
       })
       .catch(() => setTokenState('invalid'))
   }, [urlToken])
 
-  // ── Admin UI state (only active when no token) ─────────────────────────
-  const [view, setView]               = useState<'map' | 'admin'>('map')
-  const [maps, setMaps]               = useState<MapInfo[]>([])
-  const [selectedMapId, setSelectedMapId]     = useState('')
+  // ── Admin UI state ─────────────────────────────────────────────────────
+  const [view, setView]                 = useState<'map' | 'editor'>('map')
+  const [events, setEvents]             = useState<EventData[]>([])
   const [selectedEventId, setSelectedEventId] = useState('')
-  const [loading, setLoading]         = useState(true)
-  const [serverError, setServerError] = useState(false)
+  const [selectedMapId,   setSelectedMapId]   = useState('')
+  const [loading, setLoading]           = useState(true)
+  const [serverError, setServerError]   = useState(false)
+
+  // Create-event inline form
+  const [creatingEvent, setCreatingEvent] = useState(false)
+  const [newEventName,  setNewEventName]  = useState('')
+  const [creating,      setCreating]      = useState(false)
+
+  // Create-map inline form
+  const [creatingMap,  setCreatingMap]  = useState(false)
+  const [newMapName,   setNewMapName]   = useState('')
+  const [newMapSlot,   setNewMapSlot]   = useState(1)
+  const [creatingMapBusy, setCreatingMapBusy] = useState(false)
 
   useEffect(() => {
     if (urlToken) { setLoading(false); return }
-    fetch('/api/maps')
-      .then(r => { if (!r.ok) throw new Error(String(r.status)); return r.json(); })
-      .then((data: MapInfo[]) => {
-        setMaps(data)
+    fetch('/api/events')
+      .then(r => { if (!r.ok) throw new Error(); return r.json() })
+      .then((data: EventData[]) => {
+        setEvents(data)
         if (data.length > 0) {
-          setSelectedMapId(data[0].id)
-          if (data[0].events.length > 0) setSelectedEventId(data[0].events[0].id)
+          setSelectedEventId(data[0].id)
+          if (data[0].maps.length > 0) setSelectedMapId(data[0].maps[0].id)
         }
       })
       .catch(() => setServerError(true))
       .finally(() => setLoading(false))
   }, [urlToken])
 
-  const selectedMap = maps.find(m => m.id === selectedMapId)
+  const selectedEvent = events.find(e => e.id === selectedEventId)
+  const selectedMap   = selectedEvent?.maps.find(m => m.id === selectedMapId)
 
-  function handleMapChange(mapId: string) {
-    setSelectedMapId(mapId)
-    const m = maps.find(m => m.id === mapId)
-    setSelectedEventId(m?.events[0]?.id ?? '')
+  function selectEvent(eid: string) {
+    setSelectedEventId(eid)
+    const ev = events.find(e => e.id === eid)
+    setSelectedMapId(ev?.maps[0]?.id ?? '')
+    setCreatingMap(false)
   }
 
-  const navBtn = (v: typeof view, label: string) => (
-    <button onClick={() => setView(v)} style={{
-      background: view === v ? '#534AB7' : 'transparent',
-      color: '#fff', border: '1px solid #534AB7',
-      borderRadius: 6, padding: '5px 16px', cursor: 'pointer', fontSize: 14,
-    }}>{label}</button>
-  )
+  async function createEvent() {
+    if (!newEventName.trim()) return
+    setCreating(true)
+    try {
+      const r = await fetch('/api/events', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ name: newEventName.trim() }),
+      })
+      if (!r.ok) return
+      const ev: EventData = await r.json()
+      setEvents(prev => [...prev, ev])
+      setSelectedEventId(ev.id)
+      setSelectedMapId('')
+      setCreatingEvent(false)
+      setNewEventName('')
+    } finally { setCreating(false) }
+  }
 
-  const sel: React.CSSProperties = {
-    padding: '4px 8px', borderRadius: 6, fontSize: 13,
-    background: '#1a1a1a', color: '#fff', border: '1px solid #444', cursor: 'pointer',
+  async function createMap() {
+    if (!newMapName.trim() || !selectedEventId) return
+    setCreatingMapBusy(true)
+    try {
+      const r = await fetch(`/api/events/${selectedEventId}/maps`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ name: newMapName.trim(), mapSlot: newMapSlot }),
+      })
+      if (!r.ok) return
+      const newMap: MapSlot = await r.json()
+      setEvents(prev => prev.map(e =>
+        e.id === selectedEventId ? { ...e, maps: [...e.maps, newMap].sort((a, b) => a.mapSlot - b.mapSlot) } : e
+      ))
+      setSelectedMapId(newMap.id)
+      setCreatingMap(false)
+      setNewMapName('')
+      setNewMapSlot(1)
+    } finally { setCreatingMapBusy(false) }
   }
 
   // ── Token-based customer view ──────────────────────────────────────────
@@ -89,8 +134,7 @@ export default function App() {
       height: '100vh', display: 'flex', alignItems: 'center', justifyContent: 'center',
       background: '#111', color: '#888', fontSize: 15, flexDirection: 'column', gap: 10,
     }
-    if (tokenState === 'checking')
-      return <div style={centered}>Verifying access…</div>
+    if (tokenState === 'checking') return <div style={centered}>Verifying access…</div>
     if (tokenState === 'expired')
       return (
         <div style={centered}>
@@ -98,10 +142,8 @@ export default function App() {
           <div style={{ fontSize: 13 }}>Please request a new link from the event organiser.</div>
         </div>
       )
-    if (tokenState === 'invalid')
-      return <div style={centered}>Invalid or unrecognised link.</div>
-    if (!tokenEventId)
-      return <div style={centered}>This link has no event attached.</div>
+    if (tokenState === 'invalid') return <div style={centered}>Invalid or unrecognised link.</div>
+    if (!tokenMapId)              return <div style={centered}>No active map for this event right now.</div>
     return (
       <div style={{ height: '100vh', background: '#111' }}>
         <SeatMap mapId={tokenMapId} eventId={tokenEventId} sessionId={sessionId} />
@@ -109,36 +151,146 @@ export default function App() {
     )
   }
 
+  // ── Shared styles ──────────────────────────────────────────────────────
+  const sel: React.CSSProperties = {
+    padding: '4px 8px', borderRadius: 6, fontSize: 13,
+    background: '#1a1a1a', color: '#fff', border: '1px solid #444', cursor: 'pointer',
+  }
+  const navBtn = (v: typeof view, label: string) => (
+    <button onClick={() => setView(v)} style={{
+      background: view === v ? '#534AB7' : 'transparent',
+      color: '#fff', border: '1px solid #534AB7',
+      borderRadius: 6, padding: '5px 16px', cursor: 'pointer', fontSize: 14,
+    }}>{label}</button>
+  )
+
   // ── Admin view ─────────────────────────────────────────────────────────
   return (
     <div style={{ height: '100vh', display: 'flex', flexDirection: 'column', background: '#111', color: '#fff' }}>
       <nav style={{
         padding: '10px 20px', borderBottom: '1px solid #333',
-        display: 'flex', gap: 10, alignItems: 'center', flexShrink: 0,
+        display: 'flex', gap: 8, alignItems: 'center', flexShrink: 0, flexWrap: 'wrap',
       }}>
         <span style={{ fontWeight: 700, fontSize: 20, color: '#7F77DD', marginRight: 4 }}>TICKIT</span>
-
         {navBtn('map', 'Seat Map')}
-        {navBtn('admin', 'Map Editor')}
+        {navBtn('editor', 'Map Editor')}
 
-        {maps.length > 0 && (
-          <select value={selectedMapId} onChange={e => handleMapChange(e.target.value)} style={{ ...sel, marginLeft: 'auto' }}>
-            {maps.map(m => (
-              <option key={m.id} value={m.id}>{m.venue.name} — {m.name}</option>
+        {/* Event selector */}
+        {events.length > 0 && (
+          <select value={selectedEventId} onChange={e => selectEvent(e.target.value)}
+            style={{ ...sel, marginLeft: 'auto' }}>
+            {events.map(e => (
+              <option key={e.id} value={e.id}>
+                {e.venue ? `${e.venue.name} — ` : ''}{e.name}
+              </option>
             ))}
           </select>
         )}
 
-        {view === 'map' && selectedMap && selectedMap.events.length > 0 && (
-          <select value={selectedEventId} onChange={e => setSelectedEventId(e.target.value)} style={sel}>
-            {selectedMap.events.map(ev => (
-              <option key={ev.id} value={ev.id}>{ev.name}</option>
+        {/* Map slot tabs */}
+        {selectedEvent && selectedEvent.maps.length > 0 && (
+          <div style={{ display: 'flex', gap: 4 }}>
+            {selectedEvent.maps.map(m => (
+              <button key={m.id} onClick={() => setSelectedMapId(m.id)} style={{
+                padding: '4px 10px', fontSize: 12, borderRadius: 5, cursor: 'pointer',
+                background: selectedMapId === m.id ? '#2a2a3a' : 'transparent',
+                color: selectedMapId === m.id ? '#a09ce8' : '#666',
+                border: selectedMapId === m.id ? '1px solid #534AB7' : '1px solid #333',
+              }}>
+                Map {m.mapSlot}
+                {m.isPublished && <span style={{ marginLeft: 4, color: '#1D9E75', fontSize: 10 }}>●</span>}
+              </button>
             ))}
-          </select>
+            {selectedEvent.maps.length < 3 && (
+              <button onClick={() => { setCreatingMap(true); setNewMapSlot(selectedEvent.maps.length + 1) }} style={{
+                padding: '4px 10px', fontSize: 12, borderRadius: 5, cursor: 'pointer',
+                background: 'transparent', color: '#555', border: '1px dashed #444',
+              }}>+ Map</button>
+            )}
+          </div>
         )}
+
+        {/* New event button */}
+        <button onClick={() => setCreatingEvent(true)} style={{
+          padding: '4px 10px', fontSize: 12, borderRadius: 5, cursor: 'pointer',
+          background: 'transparent', color: '#666', border: '1px dashed #444',
+          marginLeft: events.length === 0 ? 'auto' : 0,
+        }}>+ Event</button>
       </nav>
 
       <div style={{ flex: 1, overflow: 'hidden' }}>
+        {/* Create event form */}
+        {creatingEvent && (
+          <div style={{
+            position: 'fixed', inset: 0, background: 'rgba(0,0,0,0.7)',
+            display: 'flex', alignItems: 'center', justifyContent: 'center', zIndex: 100,
+          }}>
+            <div style={{ background: '#1a1a1a', borderRadius: 10, padding: 28, width: 360, border: '1px solid #333' }}>
+              <div style={{ fontWeight: 600, marginBottom: 16, fontSize: 15 }}>New Event</div>
+              <input
+                autoFocus placeholder="Event name"
+                value={newEventName} onChange={e => setNewEventName(e.target.value)}
+                onKeyDown={e => e.key === 'Enter' && createEvent()}
+                style={{ width: '100%', padding: '8px 10px', borderRadius: 6, border: '1px solid #444', background: '#111', color: '#fff', fontSize: 13, boxSizing: 'border-box' }}
+              />
+              <div style={{ display: 'flex', gap: 8, marginTop: 14 }}>
+                <button onClick={createEvent} disabled={creating || !newEventName.trim()} style={{
+                  flex: 1, padding: '8px 0', borderRadius: 6, border: 'none', cursor: 'pointer',
+                  background: '#534AB7', color: '#fff', fontSize: 13,
+                }}>
+                  {creating ? 'Creating…' : 'Create'}
+                </button>
+                <button onClick={() => { setCreatingEvent(false); setNewEventName('') }} style={{
+                  padding: '8px 16px', borderRadius: 6, border: '1px solid #444',
+                  background: 'transparent', color: '#aaa', fontSize: 13, cursor: 'pointer',
+                }}>Cancel</button>
+              </div>
+            </div>
+          </div>
+        )}
+
+        {/* Create map form */}
+        {creatingMap && (
+          <div style={{
+            position: 'fixed', inset: 0, background: 'rgba(0,0,0,0.7)',
+            display: 'flex', alignItems: 'center', justifyContent: 'center', zIndex: 100,
+          }}>
+            <div style={{ background: '#1a1a1a', borderRadius: 10, padding: 28, width: 360, border: '1px solid #333' }}>
+              <div style={{ fontWeight: 600, marginBottom: 16, fontSize: 15 }}>New Map Slot</div>
+              <label style={{ display: 'block', marginBottom: 10 }}>
+                <span style={{ fontSize: 11, color: '#666', display: 'block', marginBottom: 4 }}>Slot</span>
+                <select value={newMapSlot} onChange={e => setNewMapSlot(Number(e.target.value))}
+                  style={{ width: '100%', padding: '8px 10px', borderRadius: 6, border: '1px solid #444', background: '#111', color: '#fff', fontSize: 13, boxSizing: 'border-box' as const }}>
+                  {[1, 2, 3].filter(slot => !selectedEvent?.maps.find(m => m.mapSlot === slot)).map(slot => (
+                    <option key={slot} value={slot}>Map {slot}</option>
+                  ))}
+                </select>
+              </label>
+              <label style={{ display: 'block', marginBottom: 10 }}>
+                <span style={{ fontSize: 11, color: '#666', display: 'block', marginBottom: 4 }}>Name</span>
+                <input
+                  autoFocus placeholder="Map name"
+                  value={newMapName} onChange={e => setNewMapName(e.target.value)}
+                  onKeyDown={e => e.key === 'Enter' && createMap()}
+                  style={{ width: '100%', padding: '8px 10px', borderRadius: 6, border: '1px solid #444', background: '#111', color: '#fff', fontSize: 13, boxSizing: 'border-box' as const }}
+                />
+              </label>
+              <div style={{ display: 'flex', gap: 8, marginTop: 14 }}>
+                <button onClick={createMap} disabled={creatingMapBusy || !newMapName.trim()} style={{
+                  flex: 1, padding: '8px 0', borderRadius: 6, border: 'none', cursor: 'pointer',
+                  background: '#534AB7', color: '#fff', fontSize: 13,
+                }}>
+                  {creatingMapBusy ? 'Creating…' : 'Create'}
+                </button>
+                <button onClick={() => { setCreatingMap(false); setNewMapName('') }} style={{
+                  padding: '8px 16px', borderRadius: 6, border: '1px solid #444',
+                  background: 'transparent', color: '#aaa', fontSize: 13, cursor: 'pointer',
+                }}>Cancel</button>
+              </div>
+            </div>
+          </div>
+        )}
+
         {loading ? (
           <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'center', height: '100%', color: '#666', fontSize: 14 }}>
             Loading…
@@ -147,16 +299,28 @@ export default function App() {
           <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'center', height: '100%', color: '#888', fontSize: 15 }}>
             Cannot reach the server.
           </div>
+        ) : events.length === 0 ? (
+          <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'center', height: '100%', flexDirection: 'column', gap: 14, color: '#666' }}>
+            <div style={{ fontSize: 15 }}>No events yet.</div>
+            <button onClick={() => setCreatingEvent(true)} style={{
+              padding: '8px 20px', borderRadius: 6, border: 'none', cursor: 'pointer',
+              background: '#534AB7', color: '#fff', fontSize: 13,
+            }}>Create first event</button>
+          </div>
         ) : !selectedMapId ? (
-          <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'center', height: '100%', color: '#666', fontSize: 15 }}>
-            No maps found.
+          <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'center', height: '100%', flexDirection: 'column', gap: 14, color: '#666' }}>
+            <div style={{ fontSize: 15 }}>No maps for this event yet.</div>
+            <button onClick={() => { setCreatingMap(true); setNewMapSlot(1) }} style={{
+              padding: '8px 20px', borderRadius: 6, border: 'none', cursor: 'pointer',
+              background: '#534AB7', color: '#fff', fontSize: 13,
+            }}>Create Map 1</button>
           </div>
         ) : view === 'map' ? (
-          selectedEventId
-            ? <SeatMap mapId={selectedMapId} eventId={selectedEventId} sessionId={sessionId} />
-            : <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'center', height: '100%', color: '#666', fontSize: 14 }}>
-                No events for this map yet.
-              </div>
+          <SeatMap
+            mapId={selectedMapId}
+            eventId={selectedEventId}
+            sessionId={sessionId}
+          />
         ) : (
           <MapEditor
             mapId={selectedMapId}
