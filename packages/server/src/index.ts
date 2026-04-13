@@ -786,6 +786,16 @@ app.patch("/api/seats/:seatId", ah(async (req, res) => {
   res.json(await prisma.seat.update({ where: { id: req.params.seatId }, data }));
 }));
 
+// Batch-update seat positions (used by fill-gaps)
+app.patch("/api/sections/:sectionId/seats/positions", ah(async (req, res) => {
+  const { updates } = req.body as { updates: { id: string; x: number; y: number }[] };
+  if (!Array.isArray(updates) || updates.length === 0) return err(res, 400, "updates required");
+  await prisma.$transaction(
+    updates.map(u => prisma.seat.update({ where: { id: u.id }, data: { x: u.x, y: u.y } }))
+  );
+  res.json({ ok: true, count: updates.length });
+}));
+
 // Delete a single seat
 app.delete("/api/seats/:seatId", ah(async (req, res) => {
   await prisma.$transaction([

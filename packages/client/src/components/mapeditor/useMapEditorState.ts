@@ -1939,10 +1939,10 @@ export function useMapEditorState({ mapId, svgViewBox, bgImageUrl, initialZones 
       });
     }
     setSections(prev => prev.map(s => s.id !== focusedSection ? s : { ...s, seats: updatedSeats }));
-    for (const u of updates) {
-      await fetch(`/api/seats/${u.id}`, {
+    if (updates.length > 0) {
+      await fetch(`/api/sections/${focusedSection}/seats/positions`, {
         method: "PATCH", headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ x: u.x, y: u.y }),
+        body: JSON.stringify({ updates }),
       });
     }
   };
