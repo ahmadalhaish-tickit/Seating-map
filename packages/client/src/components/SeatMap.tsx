@@ -14,7 +14,7 @@ interface Seat {
   x: number; y: number;
   isAccessible: boolean; isObstructed: boolean; notes?: string | null;
 }
-interface Row { id: string; label: string; seats: Seat[]; }
+interface Row { id: string; label: string; curve: number; skew: number; seats: Seat[]; }
 interface PricingZone { id: string; name: string; color: string; sortOrder: number; }
 type VenueObjectType = "STAGE"|"BAR"|"BATHROOM"|"DANCING"|"PARKING"|"STAIRS"|"WALL"|"DOOR"|"CHECKIN"|"TEXT";
 const VENUE_OBJECT_COLORS: Record<VenueObjectType, string> = {
@@ -405,13 +405,40 @@ export default function SeatMap({ mapId, eventId, sessionId, onSelectionChange }
     pinch: { scaleBounds: { min: MIN_ZOOM, max: MAX_ZOOM } },
     wheel: { eventOptions: { passive: false } } });
 
-  useEffect(() => {
+  const fitToContent = useCallback(() => {
     if (!mapData || !containerRef.current) return;
-    const [,,vw,vh] = mapData.svgViewBox.split(" ").map(Number);
+    let minX = Infinity, maxX = -Infinity, minY = Infinity, maxY = -Infinity;
+    for (const section of mapData.sections) {
+      for (const p of pathPoints(section.polygonPath)) {
+        if (p.x < minX) minX = p.x; if (p.x > maxX) maxX = p.x;
+        if (p.y < minY) minY = p.y; if (p.y > maxY) maxY = p.y;
+      }
+      for (const row of section.rows) {
+        const n = row.seats.length;
+        row.seats.forEach((seat, si) => {
+          const t = n > 1 ? si / (n - 1) : 0.5;
+          const sy = seat.y + (row.curve ?? 0) * (1 - (2 * t - 1) ** 2) + (row.skew ?? 0) * (t - 0.5);
+          if (seat.x < minX) minX = seat.x; if (seat.x > maxX) maxX = seat.x;
+          if (sy < minY) minY = sy; if (sy > maxY) maxY = sy;
+        });
+      }
+    }
+    if (!isFinite(minX)) {
+      const [,,vw,vh] = mapData.svgViewBox.split(" ").map(Number);
+      const { width: cw, height: ch } = containerRef.current.getBoundingClientRect();
+      const scale = Math.min(cw/vw, ch/vh) * 0.9;
+      setTransform({ scale, x: (cw-vw*scale)/2, y: (ch-vh*scale)/2 });
+      return;
+    }
+    const pad = 60;
     const { width: cw, height: ch } = containerRef.current.getBoundingClientRect();
-    const scale = Math.min(cw/vw, ch/vh) * 0.9;
-    setTransform({ scale, x: (cw-vw*scale)/2, y: (ch-vh*scale)/2 });
+    const scale = Math.min(MAX_ZOOM, Math.max(MIN_ZOOM,
+      Math.min((cw - pad * 2) / (maxX - minX), (ch - pad * 2) / (maxY - minY))
+    ));
+    setTransform({ scale, x: (cw - (maxX - minX) * scale) / 2 - minX * scale, y: (ch - (maxY - minY) * scale) / 2 - minY * scale });
   }, [mapData]);
+
+  useEffect(() => { if (mapData) fitToContent(); }, [mapData]); // eslint-disable-line react-hooks/exhaustive-deps
 
   const handleSeatClick = useCallback(async (seat: Seat, e: React.MouseEvent) => {
     e.stopPropagation();
@@ -494,8 +521,10 @@ export default function SeatMap({ mapId, eventId, sessionId, onSelectionChange }
   }, [inventory, selected, eventId, onSelectionChange, handleSeatClick]);
 
   if (!mapData) return (
-    <div style={{ display:"flex", alignItems:"center", justifyContent:"center", height:"100%", color:"#666", fontSize:14 }}>
-      Loading map…
+    <div style={{ display:"flex", alignItems:"center", justifyContent:"center", height:"100%", background:"#fff", flexDirection:"column", gap:16 }}>
+      <style>{`@keyframes _spin{to{transform:rotate(360deg)}}`}</style>
+      <div style={{ width:36, height:36, borderRadius:"50%", border:"3px solid #eee", borderTopColor:"#534AB7", animation:"_spin 0.8s linear infinite" }} />
+      <span style={{ fontSize:13, color:"#999" }}>Loading map…</span>
     </div>
   );
 
@@ -840,7 +869,12 @@ export default function SeatMap({ mapId, eventId, sessionId, onSelectionChange }
                   </text>
                 )}
                 {!isGA && (!hideSeats || isExpanded) && section.rows.flatMap(row =>
-                  row.seats.map(seat => {
+                  row.seats.map((seat, si) => {
+                    // Apply row curve/skew offset (same formula as getDisplaySeats in editor)
+                    const n = row.seats.length;
+                    const t = n > 1 ? si / (n - 1) : 0.5;
+                    const dy = (row.curve ?? 0) * (1 - (2 * t - 1) ** 2) + (row.skew ?? 0) * (t - 0.5);
+                    const sx = seat.x, sy = seat.y + dy;
                     const holdInfo = seatHoldMap.get(seat.id);
                     const st = holdInfo ? "BLOCKED" : (inventory[seat.id] ?? "AVAILABLE");
                     const mine = selected.has(seat.id);
@@ -866,8 +900,8 @@ export default function SeatMap({ mapId, eventId, sessionId, onSelectionChange }
                         onClick={e => handleSeatClick(seat, e)}
                         onMouseEnter={e => { let sn = zone?.name, sc = zone?.color; if (seat.notes) { try { const p = JSON.parse(seat.notes); if (p.z) { const sz = mapData?.pricingZones.find(z2 => z2.id === p.z); if (sz) { sn = sz.name; sc = sz.color; } } } catch {} } setHovered({ seat, rowLabel: row.label, sectionName: section.name, zoneName: sn, zoneColor: sc, holdName: holdInfo?.name, x: e.clientX, y: e.clientY }); }}
                         onMouseLeave={() => setHovered(null)}>
-                        <circle cx={seat.x} cy={seat.y} r={sectionSeatRadius * 1.4} fill="transparent" stroke="none" style={{ pointerEvents:"all" }} />
-                        {renderSeat(seat.x, seat.y, shape, sectionSeatRadius, seatFill, seatStroke, seatSW2)}
+                        <circle cx={sx} cy={sy} r={sectionSeatRadius * 1.4} fill="transparent" stroke="none" style={{ pointerEvents:"all" }} />
+                        {renderSeat(sx, sy, shape, sectionSeatRadius, seatFill, seatStroke, seatSW2)}
                       </g>
                     );
                   })
@@ -1025,16 +1059,11 @@ export default function SeatMap({ mapId, eventId, sessionId, onSelectionChange }
 
       {/* Zoom controls */}
       <div style={{ position:"absolute", bottom:16, right:16, display:"flex", flexDirection:"column", gap:6 }}>
-        {["+","↺","−"].map((label, i) => (
+        {["+","⊡","−"].map((label, i) => (
           <button key={label} onClick={() => {
             if (i===0) setTransform(t => ({ ...t, scale: Math.min(MAX_ZOOM, t.scale*1.25) }));
             if (i===2) setTransform(t => ({ ...t, scale: Math.max(MIN_ZOOM, t.scale*0.8) }));
-            if (i===1 && containerRef.current) {
-              const [,,vw2,vh2] = mapData.svgViewBox.split(" ").map(Number);
-              const { width:cw, height:ch } = containerRef.current.getBoundingClientRect();
-              const sc = Math.min(cw/vw2, ch/vh2) * 0.9;
-              setTransform({ scale:sc, x:(cw-vw2*sc)/2, y:(ch-vh2*sc)/2 });
-            }
+            if (i===1) fitToContent();
           }} style={{
             width:36, height:36, borderRadius:6,
             border:"1px solid #ddd", background:"#fff",

@@ -28,8 +28,9 @@ export function useMapEditorState({ mapId, svgViewBox, bgImageUrl, initialZones 
   const [newHold, setNewHold]         = useState({ name: "", color: "#cc4444" });
   const [activeHoldId, setActiveHoldId] = useState<string | null>(null);
   const [holdEditDraft, setHoldEditDraft] = useState<{ id: string; name: string; color: string } | null>(null);
-  const [sidebarTab, setSidebarTab]   = useState<"editor" | "holds">("editor");
+  const [sidebarTab, setSidebarTab]   = useState<"editor" | "holds" | "event">("editor");
   const [showRows, setShowRows]       = useState(false);
+  const [loading, setLoading]         = useState(true);
   const [saving, setSaving]           = useState(false);
   const [bakingTransforms, setBaking] = useState(false);
   const [newZone, setNewZone]         = useState({ name: "", color: "#7F77DD" });
@@ -85,8 +86,9 @@ export function useMapEditorState({ mapId, svgViewBox, bgImageUrl, initialZones 
   }>({ eventId: '', eventName: '', mapSlot: 1, scheduledStartAt: null, scheduledEndAt: null, isPublished: false });
 
   // Refs
-  const containerRef     = useRef<HTMLDivElement>(null);
-  const transformRef     = useRef(transform);
+  const containerRef       = useRef<HTMLDivElement>(null);
+  const transformRef       = useRef(transform);
+  const preFocusTransform  = useRef<{ x: number; y: number; scale: number } | null>(null);
   const sectionsRef      = useRef(sections);
   const drawingRef       = useRef(drawing);
   const toolRef          = useRef(tool);
@@ -356,7 +358,9 @@ export function useMapEditorState({ mapId, svgViewBox, bgImageUrl, initialZones 
               }))
             );
             if (rawSeats.length > 0) {
-              const fitted = reshapeToFitSeats(rawSeats);
+              const rowInfos = s.rows.map(row => ({ id: row.id, label: row.label, curve: row.curve ?? 0, skew: row.skew ?? 0 }));
+              const displaySeats = getDisplaySeats(rawSeats, rowInfos);
+              const fitted = reshapeToFitSeats(displaySeats.length > 0 ? displaySeats : rawSeats);
               if (fitted.length > 0) return fitted;
             }
             return pathToPoints(s.polygonPath);
@@ -373,6 +377,7 @@ export function useMapEditorState({ mapId, svgViewBox, bgImageUrl, initialZones 
           scheduledEndAt:   map.scheduledEndAt   ?? null,
           isPublished:      map.isPublished  ?? false,
         });
+        setLoading(false);
       });
   }, [mapId]);
 
@@ -383,6 +388,7 @@ export function useMapEditorState({ mapId, svgViewBox, bgImageUrl, initialZones 
   const focusSection = (sectionId: string) => {
     const s = sectionsRef.current.find(sec => sec.id === sectionId);
     if (!s || !containerRef.current) return;
+    preFocusTransform.current = { ...transformRef.current };
     const bbox = polyBBox(s.points);
     const { width: cw, height: ch } = containerRef.current.getBoundingClientRect();
     const PAD = 120;
@@ -407,10 +413,12 @@ export function useMapEditorState({ mapId, svgViewBox, bgImageUrl, initialZones 
   const exitFocus = () => {
     setFocused(null);
     setSelectedSeats(new Set());
-    if (!containerRef.current) return;
-    const { width: cw, height: ch } = containerRef.current.getBoundingClientRect();
-    const scale = Math.min(cw / vw, ch / vh) * 0.85;
-    setTransform({ scale, x: (cw - vw * scale) / 2, y: (ch - vh * scale) / 2 });
+    if (preFocusTransform.current) {
+      setTransform(preFocusTransform.current);
+      preFocusTransform.current = null;
+    } else {
+      fitToContent();
+    }
   };
 
   // ── Undo / Redo helpers ───────────────────────────────────────────────
@@ -428,16 +436,18 @@ export function useMapEditorState({ mapId, svgViewBox, bgImageUrl, initialZones 
   const syncHistoryState = async (target: DraftSection[], current: DraftSection[]) => {
     const currById = new Map(current.map(s => [s.id, s]));
     const targById = new Map(target.map(s => [s.id, s]));
-    // Sections created after snapshot → delete from DB
-    for (const s of current) {
-      if (!targById.has(s.id) && s.saved) {
-        await fetch(`/api/sections/${s.id}`, { method: "DELETE" });
-      }
+    // Sections created after snapshot → batch delete from DB
+    const toDelete = current.filter(s => !targById.has(s.id) && s.saved).map(s => s.id);
+    if (toDelete.length > 0) {
+      fetch("/api/sections/batch", {
+        method: "DELETE", headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ sectionIds: toDelete }),
+      });
     }
-    // Sections that changed → patch back
-    for (const prev of target) {
+    // Sections that changed → patch concurrently
+    await Promise.all(target.map(prev => {
       const curr = currById.get(prev.id);
-      if (!curr || !prev.saved) continue;
+      if (!curr || !prev.saved) return;
       const patches: Record<string, unknown> = {};
       const prevPath = pointsToPath(prev.points);
       const currPath = pointsToPath(curr.points);
@@ -445,13 +455,12 @@ export function useMapEditorState({ mapId, svgViewBox, bgImageUrl, initialZones 
       if (prev.name !== curr.name) patches.name = prev.name;
       if (prev.label !== curr.label) patches.label = prev.label;
       if (prev.sectionType !== curr.sectionType) patches.sectionType = prev.sectionType;
-      if (Object.keys(patches).length > 0) {
-        await fetch(`/api/sections/${prev.id}`, {
-          method: "PATCH", headers: { "Content-Type": "application/json" },
-          body: JSON.stringify(patches),
-        });
-      }
-    }
+      if (Object.keys(patches).length === 0) return;
+      return fetch(`/api/sections/${prev.id}`, {
+        method: "PATCH", headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(patches),
+      });
+    }));
   };
 
   // ── Keyboard ──────────────────────────────────────────────────────────
@@ -659,6 +668,42 @@ export function useMapEditorState({ mapId, svgViewBox, bgImageUrl, initialZones 
     const scale = Math.min(cw / vw, ch / vh) * 0.85;
     setTransform({ scale, x: (cw - vw * scale) / 2, y: (ch - vh * scale) / 2 });
   };
+
+  const fitToContent = () => {
+    if (!containerRef.current) return;
+    const secs = sectionsRef.current;
+    if (secs.length === 0) { resetZoom(); return; }
+    let minX = Infinity, maxX = -Infinity, minY = Infinity, maxY = -Infinity;
+    for (const s of secs) {
+      for (const p of s.points) {
+        if (p.x < minX) minX = p.x; if (p.x > maxX) maxX = p.x;
+        if (p.y < minY) minY = p.y; if (p.y > maxY) maxY = p.y;
+      }
+      if (s.seats && s.seats.length > 0) {
+        const disp = s.rows && s.rows.length > 0 ? getDisplaySeats(s.seats, s.rows) : s.seats;
+        for (const seat of disp) {
+          if (seat.x < minX) minX = seat.x; if (seat.x > maxX) maxX = seat.x;
+          if (seat.y < minY) minY = seat.y; if (seat.y > maxY) maxY = seat.y;
+        }
+      }
+    }
+    if (!isFinite(minX)) { resetZoom(); return; }
+    const pad = 60;
+    const { width: cw, height: ch } = containerRef.current.getBoundingClientRect();
+    const scale = Math.min(MAX_ZOOM, Math.max(MIN_ZOOM,
+      Math.min((cw - pad * 2) / (maxX - minX), (ch - pad * 2) / (maxY - minY))
+    ));
+    setTransform({ scale, x: (cw - (maxX - minX) * scale) / 2 - minX * scale, y: (ch - (maxY - minY) * scale) / 2 - minY * scale });
+  };
+
+  // Auto-fit to content on first load
+  const hasAutoFit = useRef(false);
+  useEffect(() => {
+    if (sections.length > 0 && !hasAutoFit.current) {
+      hasAutoFit.current = true;
+      requestAnimationFrame(fitToContent);
+    }
+  }, [sections.length]); // eslint-disable-line react-hooks/exhaustive-deps
 
   // ── SVG coord helper ──────────────────────────────────────────────────
   const clientToSvg = (clientX: number, clientY: number): Point => {
@@ -1319,12 +1364,15 @@ export function useMapEditorState({ mapId, svgViewBox, bgImageUrl, initialZones 
           const bbox = polyBBox(section.points);
           const r = seatRadiusRef.current;
           const isTable = section.sectionType === "TABLE";
-          for (const orig of origSeats) {
-            const nx = isTable ? orig.x + dx : Math.max(bbox.minX + r, Math.min(bbox.maxX - r, orig.x + dx));
-            const ny = isTable ? orig.y + dy : Math.max(bbox.minY + r, Math.min(bbox.maxY - r, orig.y + dy));
-            await fetch(`/api/seats/${orig.id}`, {
+          const seatUpdates = origSeats.map(orig => ({
+            id: orig.id,
+            x: isTable ? orig.x + dx : Math.max(bbox.minX + r, Math.min(bbox.maxX - r, orig.x + dx)),
+            y: isTable ? orig.y + dy : Math.max(bbox.minY + r, Math.min(bbox.maxY - r, orig.y + dy)),
+          }));
+          if (seatUpdates.length > 0) {
+            await fetch(`/api/sections/${sectionId}/seats/positions`, {
               method: "PATCH", headers: { "Content-Type": "application/json" },
-              body: JSON.stringify({ x: nx, y: ny }),
+              body: JSON.stringify({ updates: seatUpdates }),
             });
           }
         }
@@ -1691,7 +1739,8 @@ export function useMapEditorState({ mapId, svgViewBox, bgImageUrl, initialZones 
     try {
       const { count, seatsPerRow, startX, startY, spacingX, spacingY,
               rowLabelType, rowStart, seatOrder, seatStart } = rowCfg;
-      for (let r = 0; r < count; r++) {
+      type FR = { id: string; label: string; curve?: number; skew?: number; seats: { id: string; x: number; y: number; seatNumber: string }[] };
+      const rowsPayload = Array.from({ length: count }, (_, r) => {
         const rowY = startY + r * spacingY;
         const rowLabel = rowLabelType === "letters"
           ? String.fromCharCode(65 + rowStart + r)
@@ -1700,37 +1749,33 @@ export function useMapEditorState({ mapId, svgViewBox, bgImageUrl, initialZones 
           const num = seatOrder === "rtl" ? (seatStart + seatsPerRow - 1 - i) : (seatStart + i);
           return { seatNumber: String(num), x: startX + i * spacingX, y: rowY };
         });
-        await fetch(`/api/sections/${sectionId}/rows`, {
-          method: "POST", headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ label: rowLabel, startX, startY: rowY, seats }),
-        });
-      }
-      const map = await fetch(`/api/maps/${mapId}`).then(r => r.json());
-      const fresh = map.sections.find((s: { id: string }) => s.id === sectionId);
-      if (fresh) {
-        type FR = { id: string; label: string; curve?: number; skew?: number; seats: { id: string; x: number; y: number; seatNumber: string }[] };
-        const newSeats: SeatDot[] = fresh.rows.flatMap((row: FR) =>
-          row.seats.map(seat => ({ id: seat.id, x: seat.x, y: seat.y, seatNumber: seat.seatNumber, rowLabel: row.label, rowId: row.id }))
-        );
-        const newRows: RowInfo[] = fresh.rows.map((row: FR) => ({ id: row.id, label: row.label, curve: row.curve ?? 0, skew: row.skew ?? 0 }));
-        const PAD = 16;
-        const xs = newSeats.map(s => s.x), ys = newSeats.map(s => s.y);
-        const x0 = Math.min(...xs) - PAD, y0 = Math.min(...ys) - PAD;
-        const x1 = Math.max(...xs) + PAD, y1 = Math.max(...ys) + PAD;
-        const newPoints: Point[] = [{ x: x0, y: y0 }, { x: x1, y: y0 }, { x: x1, y: y1 }, { x: x0, y: y1 }];
-        const sec = sectionsRef.current.find(s => s.id === sectionId);
-        const notesObj: Record<string, unknown> = { seatRadius };
-        if (sec?.edgeCurve) notesObj.edgeCurve = sec.edgeCurve;
-        if (sec?.labelOffset) notesObj.labelOffset = sec.labelOffset;
-        if (sec?.labelSize) notesObj.labelSize = sec.labelSize;
-        if (sec?.capacity !== undefined) notesObj.capacity = sec.capacity;
-        if (sec?.hideSeats) notesObj.hideSeats = sec.hideSeats;
-        await fetch(`/api/sections/${sectionId}`, {
-          method: "PATCH", headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ polygonPath: pointsToPath(newPoints), notes: JSON.stringify(notesObj) }),
-        });
-        upd(sectionId, { seats: newSeats, points: newPoints, rows: newRows });
-      }
+        return { label: rowLabel, startX, startY: rowY, seats };
+      });
+      const createdRows = await fetch(`/api/sections/${sectionId}/rows/batch`, {
+        method: "POST", headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ rows: rowsPayload }),
+      }).then(r => r.json()) as FR[];
+      const newSeats: SeatDot[] = createdRows.flatMap(row =>
+        row.seats.map(seat => ({ id: seat.id, x: seat.x, y: seat.y, seatNumber: seat.seatNumber, rowLabel: row.label, rowId: row.id }))
+      );
+      const newRows: RowInfo[] = createdRows.map(row => ({ id: row.id, label: row.label, curve: row.curve ?? 0, skew: row.skew ?? 0 }));
+      const PAD = 16;
+      const xs = newSeats.map(s => s.x), ys = newSeats.map(s => s.y);
+      const x0 = Math.min(...xs) - PAD, y0 = Math.min(...ys) - PAD;
+      const x1 = Math.max(...xs) + PAD, y1 = Math.max(...ys) + PAD;
+      const newPoints: Point[] = [{ x: x0, y: y0 }, { x: x1, y: y0 }, { x: x1, y: y1 }, { x: x0, y: y1 }];
+      const sec = sectionsRef.current.find(s => s.id === sectionId);
+      const notesObj: Record<string, unknown> = { seatRadius };
+      if (sec?.edgeCurve) notesObj.edgeCurve = sec.edgeCurve;
+      if (sec?.labelOffset) notesObj.labelOffset = sec.labelOffset;
+      if (sec?.labelSize) notesObj.labelSize = sec.labelSize;
+      if (sec?.capacity !== undefined) notesObj.capacity = sec.capacity;
+      if (sec?.hideSeats) notesObj.hideSeats = sec.hideSeats;
+      await fetch(`/api/sections/${sectionId}`, {
+        method: "PATCH", headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ polygonPath: pointsToPath(newPoints), notes: JSON.stringify(notesObj) }),
+      });
+      upd(sectionId, { seats: newSeats, points: newPoints, rows: newRows });
       setShowRows(false);
     } finally { setSaving(false); }
   };
@@ -1754,7 +1799,8 @@ export function useMapEditorState({ mapId, svgViewBox, bgImageUrl, initialZones 
       if (!secRes.ok) return;
       const created = await secRes.json();
       const sectionId: string = created.id;
-      for (let r = 0; r < count; r++) {
+      type FR2 = { id: string; label: string; curve?: number; skew?: number; seats: { id: string; x: number; y: number; seatNumber: string }[] };
+      const rowsPayload2 = Array.from({ length: count }, (_, r) => {
         const rowY = origin.y + r * spacingY;
         const rowLabel = rowLabelType === "letters"
           ? String.fromCharCode(65 + rowStart + r)
@@ -1763,35 +1809,30 @@ export function useMapEditorState({ mapId, svgViewBox, bgImageUrl, initialZones 
           const num = seatOrder === "rtl" ? (seatStart + seatsPerRow - 1 - i) : (seatStart + i);
           return { seatNumber: String(num), x: origin.x + i * spacingX, y: rowY };
         });
-        await fetch(`/api/sections/${sectionId}/rows`, {
-          method: "POST", headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ label: rowLabel, startX: origin.x, startY: rowY, seats }),
-        });
-      }
-      // Re-fetch to get DB-assigned IDs, then update polygon to hug seats
-      const map = await fetch(`/api/maps/${mapId}`).then(r => r.json());
-      const fresh = map.sections.find((s: { id: string }) => s.id === sectionId);
-      if (fresh) {
-        type FR = { id: string; label: string; curve?: number; skew?: number; seats: { id: string; x: number; y: number; seatNumber: string }[] };
-        const newSeats: SeatDot[] = fresh.rows.flatMap((row: FR) =>
-          row.seats.map((seat: FR["seats"][0]) => ({ id: seat.id, x: seat.x, y: seat.y, seatNumber: seat.seatNumber, rowLabel: row.label, rowId: row.id }))
-        );
-        const newRows: RowInfo[] = fresh.rows.map((row: FR) => ({ id: row.id, label: row.label, curve: row.curve ?? 0, skew: row.skew ?? 0 }));
-        const newPoints = reshapeToFitSeats(newSeats);
-        await fetch(`/api/sections/${sectionId}`, {
-          method: "PATCH", headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ polygonPath: pointsToPath(newPoints), notes: JSON.stringify({ seatRadius }) }),
-        });
-        setSections(prev => [...prev, {
-          id: sectionId, name: `Section ${secNum}`, label: `S${secNum}`,
-          sectionType: "RESERVED", points: newPoints, saved: true, edgeCurve: 0,
-          seats: newSeats, rows: newRows,
-        }]);
-        setSelected(sectionId);
-        setSeatedPlacement(null);
-        setTool("select");
-        focusSection(sectionId);
-      }
+        return { label: rowLabel, startX: origin.x, startY: rowY, seats };
+      });
+      const createdRows2 = await fetch(`/api/sections/${sectionId}/rows/batch`, {
+        method: "POST", headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ rows: rowsPayload2 }),
+      }).then(r => r.json()) as FR2[];
+      const newSeats: SeatDot[] = createdRows2.flatMap(row =>
+        row.seats.map((seat: FR2["seats"][0]) => ({ id: seat.id, x: seat.x, y: seat.y, seatNumber: seat.seatNumber, rowLabel: row.label, rowId: row.id }))
+      );
+      const newRows: RowInfo[] = createdRows2.map(row => ({ id: row.id, label: row.label, curve: row.curve ?? 0, skew: row.skew ?? 0 }));
+      const newPoints = reshapeToFitSeats(newSeats);
+      await fetch(`/api/sections/${sectionId}`, {
+        method: "PATCH", headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ polygonPath: pointsToPath(newPoints), notes: JSON.stringify({ seatRadius }) }),
+      });
+      setSections(prev => [...prev, {
+        id: sectionId, name: `Section ${secNum}`, label: `S${secNum}`,
+        sectionType: "RESERVED", points: newPoints, saved: true, edgeCurve: 0,
+        seats: newSeats, rows: newRows,
+      }]);
+      setSelected(sectionId);
+      setSeatedPlacement(null);
+      setTool("select");
+      focusSection(sectionId);
     } finally { setSaving(false); }
   };
 
@@ -1849,19 +1890,25 @@ export function useMapEditorState({ mapId, svgViewBox, bgImageUrl, initialZones 
   const applyGlobalTransform = () => {
     if (!focusedSection) return;
     const sec = sectionsRef.current.find(s => s.id === focusedSection);
-    setSections(prev => prev.map(s => {
-      if (s.id !== focusedSection) return s;
-      const newRows = s.rows?.map(r => ({ ...r, curve: globalCurve, skew: globalSkew })) ?? [];
-      const disp = getDisplaySeats(s.seats ?? [], newRows);
-      const pts  = disp.length > 0 ? reshapeToFitSeats(disp) : null;
-      return { ...s, rows: newRows, ...(pts ? { points: pts } : {}) };
-    }));
-    // Persist all rows
-    for (const row of sec?.rows ?? []) {
-      fetch(`/api/rows/${row.id}`, {
+    if (!sec) return;
+    const newRows = sec.rows?.map(r => ({ ...r, curve: globalCurve, skew: globalSkew })) ?? [];
+    const disp = getDisplaySeats(sec.seats ?? [], newRows);
+    const pts  = disp.length > 0 ? reshapeToFitSeats(disp) : null;
+    setSections(prev => prev.map(s =>
+      s.id !== focusedSection ? s : { ...s, rows: newRows, ...(pts ? { points: pts } : {}) }
+    ));
+    // Persist rows transform + updated polygon path in parallel
+    if (sec.rows && sec.rows.length > 0) {
+      fetch(`/api/sections/${focusedSection}/rows/transform`, {
         method: "PATCH", headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ curve: globalCurve, skew: globalSkew }),
       });
+      if (pts) {
+        fetch(`/api/sections/${focusedSection}`, {
+          method: "PATCH", headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ polygonPath: pointsToPath(pts) }),
+        });
+      }
     }
   };
 
@@ -1879,10 +1926,11 @@ export function useMapEditorState({ mapId, svgViewBox, bgImageUrl, initialZones 
         rows: section.rows.map(r => ({ ...r, curve: 0, skew: 0 })),
         points: bakedPoints,
       });
-      for (const seat of displayed) {
-        await fetch(`/api/seats/${seat.id}`, {
+      const bakeUpdates = displayed.map(seat => ({ id: seat.id, x: seat.x, y: seat.y }));
+      if (bakeUpdates.length > 0) {
+        await fetch(`/api/sections/${focusedSection}/seats/positions`, {
           method: "PATCH", headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ x: seat.x, y: seat.y }),
+          body: JSON.stringify({ updates: bakeUpdates }),
         });
       }
       await fetch(`/api/sections/${focusedSection}`, {
@@ -1904,9 +1952,10 @@ export function useMapEditorState({ mapId, svgViewBox, bgImageUrl, initialZones 
 
   const deleteSelectedSeats = async () => {
     if (!focusedSection || selectedSeats.size === 0) return;
-    for (const seatId of selectedSeats) {
-      await fetch(`/api/seats/${seatId}`, { method: "DELETE" });
-    }
+    await fetch(`/api/sections/${focusedSection}/seats/batch`, {
+      method: "DELETE", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ seatIds: [...selectedSeats] }),
+    });
     setSections(prev => prev.map(s => s.id !== focusedSection ? s : {
       ...s, seats: s.seats?.filter(seat => !selectedSeats.has(seat.id)),
     }));
@@ -1975,9 +2024,12 @@ export function useMapEditorState({ mapId, svgViewBox, bgImageUrl, initialZones 
   const deleteMultiSelected = async () => {
     pushHistory();
     const ids = [...multiSelected];
-    for (const id of ids) {
-      const s = sectionsRef.current.find(sec => sec.id === id);
-      if (s?.saved) await fetch(`/api/sections/${id}`, { method: "DELETE" });
+    const savedIds = ids.filter(id => sectionsRef.current.find(sec => sec.id === id)?.saved);
+    if (savedIds.length > 0) {
+      await fetch("/api/sections/batch", {
+        method: "DELETE", headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ sectionIds: savedIds }),
+      });
     }
     setSections(p => p.filter(s => !multiSelected.has(s.id)));
     setMultiSelected(new Set());
@@ -2175,28 +2227,33 @@ export function useMapEditorState({ mapId, svgViewBox, bgImageUrl, initialZones 
               if (!rowMap.has(seat.rowId)) rowMap.set(seat.rowId, []);
               rowMap.get(seat.rowId)!.push(seat);
             }
+            const pasteRowsPayload = s.rows.map(row => {
+              const rSeats = rowMap.get(row.id) ?? [];
+              return {
+                label: row.label,
+                startX: rSeats[0]?.x ?? 0, startY: rSeats[0]?.y ?? 0,
+                seats: rSeats.map(seat => ({ seatNumber: seat.seatNumber, x: seat.x, y: seat.y })),
+              };
+            });
+            type PasteRow = { id: string; label: string; seats: { id: string; x: number; y: number; seatNumber: string }[] };
+            const pasteCreated = await fetch(`/api/sections/${realId}/rows/batch`, {
+              method: "POST", headers: { "Content-Type": "application/json" },
+              body: JSON.stringify({ rows: pasteRowsPayload }),
+            }).then(r => r.json()) as PasteRow[];
             const finalRows: RowInfo[] = [];
             const finalSeats: SeatDot[] = [];
-            for (const row of s.rows) {
-              const rSeats = rowMap.get(row.id) ?? [];
-              const rRes = await fetch(`/api/sections/${realId}/rows`, {
-                method: "POST", headers: { "Content-Type": "application/json" },
-                body: JSON.stringify({
-                  label: row.label,
-                  startX: rSeats[0]?.x ?? 0, startY: rSeats[0]?.y ?? 0,
-                  seats: rSeats.map(seat => ({ seatNumber: seat.seatNumber, x: seat.x, y: seat.y })),
-                }),
-              });
-              const savedRow = await rRes.json();
-              finalRows.push({ id: savedRow.id, label: savedRow.label, curve: row.curve, skew: row.skew });
-              savedRow.seats.forEach((seat: { id: string; x: number; y: number; seatNumber: string }, i: number) => {
+            pasteCreated.forEach((savedRow, ri) => {
+              const origRow = s.rows![ri];
+              const rSeats = rowMap.get(origRow.id) ?? [];
+              finalRows.push({ id: savedRow.id, label: savedRow.label, curve: origRow.curve, skew: origRow.skew });
+              savedRow.seats.forEach((seat, i) => {
                 finalSeats.push({
                   id: seat.id, x: seat.x, y: seat.y,
                   seatNumber: seat.seatNumber, rowLabel: savedRow.label, rowId: savedRow.id,
                   shape: rSeats[i]?.shape,
                 });
               });
-            }
+            });
             setSections(prev => prev.map(sec => sec.id === realId ? { ...sec, rows: finalRows, seats: finalSeats } : sec));
           }
         }
@@ -2294,10 +2351,14 @@ export function useMapEditorState({ mapId, svgViewBox, bgImageUrl, initialZones 
       upd(sectionId, {
         seats: seats.map((seat, i) => i < newChairPts.length ? { ...seat, x: newChairPts[i].x, y: newChairPts[i].y } : seat),
       });
-      for (let i = 0; i < Math.min(seats.length, newChairPts.length); i++) {
-        await fetch(`/api/seats/${seats[i].id}`, {
+      const chairUpdates = Array.from(
+        { length: Math.min(seats.length, newChairPts.length) },
+        (_, i) => ({ id: seats[i].id, x: newChairPts[i].x, y: newChairPts[i].y })
+      );
+      if (chairUpdates.length > 0) {
+        await fetch(`/api/sections/${sectionId}/seats/positions`, {
           method: "PATCH", headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ x: newChairPts[i].x, y: newChairPts[i].y }),
+          body: JSON.stringify({ updates: chairUpdates }),
         });
       }
     }
@@ -2520,6 +2581,7 @@ export function useMapEditorState({ mapId, svgViewBox, bgImageUrl, initialZones 
     newHold, setNewHold,
     activeHoldId, setActiveHoldId,
     holdEditDraft, setHoldEditDraft,
+    loading,
     sidebarTab, setSidebarTab,
     showRows, setShowRows,
     saving, setSaving,
@@ -2586,6 +2648,7 @@ export function useMapEditorState({ mapId, svgViewBox, bgImageUrl, initialZones 
     exitFocus,
     zoom,
     resetZoom,
+    fitToContent,
     clientToSvg,
     handleMouseDown,
     handleMouseMove,

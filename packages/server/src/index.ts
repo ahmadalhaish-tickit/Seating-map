@@ -278,13 +278,8 @@ app.patch("/api/sections/:sectionId/rotate", ah(async (req, res) => {
 // Bulk-move section polygon + all its seats by a delta
 app.patch("/api/sections/:sectionId/move", ah(async (req, res) => {
   const { dx, dy } = req.body as { dx: number; dy: number };
-  const rows = await prisma.row.findMany({
-    where: { sectionId: req.params.sectionId },
-    select: { id: true },
-  });
-  const rowIds = rows.map(r => r.id);
   await prisma.seat.updateMany({
-    where: { rowId: { in: rowIds } },
+    where: { row: { sectionId: req.params.sectionId } },
     data: { x: { increment: dx }, y: { increment: dy } },
   });
   res.json({ ok: true });
@@ -762,6 +757,64 @@ app.post("/api/sections/:sectionId/rows", ah(async (req, res) => {
       seats: seats ? { create: seats } : undefined },
     include: { seats: true },
   }));
+}));
+
+// Batch-create multiple rows + seats in one transaction, returns rows with DB-assigned IDs
+app.post("/api/sections/:sectionId/rows/batch", ah(async (req, res) => {
+  const { rows } = req.body as {
+    rows: { label: string; startX: number; startY: number; angle?: number;
+            seats: { seatNumber: string; x: number; y: number }[] }[]
+  };
+  if (!Array.isArray(rows) || rows.length === 0) return err(res, 400, "rows required");
+  const created = await prisma.$transaction(
+    rows.map(row => prisma.row.create({
+      data: {
+        sectionId: req.params.sectionId,
+        label: row.label, startX: row.startX, startY: row.startY, angle: row.angle ?? 0,
+        seats: row.seats.length > 0 ? { create: row.seats } : undefined,
+      },
+      include: { seats: true },
+    }))
+  );
+  res.status(201).json(created);
+}));
+
+// Batch-delete multiple sections (+ their rows/seats) in one transaction
+app.delete("/api/sections/batch", ah(async (req, res) => {
+  const { sectionIds } = req.body as { sectionIds: string[] };
+  if (!Array.isArray(sectionIds) || sectionIds.length === 0) return err(res, 400, "sectionIds required");
+  const rows = await prisma.row.findMany({ where: { sectionId: { in: sectionIds } }, select: { id: true } });
+  const rowIds = rows.map(r => r.id);
+  await prisma.$transaction([
+    prisma.seatInventory.deleteMany({ where: { seat: { rowId: { in: rowIds } } } }),
+    prisma.seat.deleteMany({ where: { rowId: { in: rowIds } } }),
+    prisma.row.deleteMany({ where: { sectionId: { in: sectionIds } } }),
+    prisma.sectionZoneMapping.deleteMany({ where: { sectionId: { in: sectionIds } } }),
+    prisma.section.deleteMany({ where: { id: { in: sectionIds } } }),
+  ]);
+  res.status(204).send();
+}));
+
+// Batch-delete seats by ID list
+app.delete("/api/sections/:sectionId/seats/batch", ah(async (req, res) => {
+  const { seatIds } = req.body as { seatIds: string[] };
+  if (!Array.isArray(seatIds) || seatIds.length === 0) return err(res, 400, "seatIds required");
+  await prisma.$transaction([
+    prisma.seatInventory.deleteMany({ where: { seatId: { in: seatIds } } }),
+    prisma.seat.deleteMany({ where: { id: { in: seatIds } } }),
+  ]);
+  res.status(204).send();
+}));
+
+// Apply curve/skew to all rows in a section at once
+app.patch("/api/sections/:sectionId/rows/transform", ah(async (req, res) => {
+  const { curve, skew } = req.body as { curve?: number; skew?: number };
+  const data: Record<string, number> = {};
+  if (curve !== undefined) data.curve = curve;
+  if (skew  !== undefined) data.skew  = skew;
+  if (Object.keys(data).length === 0) return err(res, 400, "curve or skew required");
+  await prisma.row.updateMany({ where: { sectionId: req.params.sectionId }, data });
+  res.json({ ok: true });
 }));
 
 // Update seat (seatNumber, position, shape, and/or zoneId — shape+zone stored as JSON in notes)

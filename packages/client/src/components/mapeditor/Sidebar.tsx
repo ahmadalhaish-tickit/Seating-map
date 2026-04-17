@@ -22,7 +22,7 @@ export default function Sidebar() {
       {/* Tab bar */}
       <div style={{ display: "flex", borderBottom: "1px solid #333", flexShrink: 0 }}>
         {(["editor", "holds", "event"] as const).map(tab => (
-          <button key={tab} onClick={() => setSidebarTab(tab as "editor" | "holds")}
+          <button key={tab} onClick={() => setSidebarTab(tab)}
             style={{ flex: 1, padding: "10px 0", border: "none", borderBottom: sidebarTab === tab ? "2px solid #534AB7" : "2px solid transparent", background: "transparent", color: sidebarTab === tab ? "#a09ce8" : "#666", fontSize: 12, fontWeight: sidebarTab === tab ? 600 : 400, cursor: "pointer", textTransform: "capitalize" }}>
             {tab === "holds" ? `Holds${holds.length ? ` (${holds.length})` : ""}` : tab === "event" ? "Schedule" : "Editor"}
           </button>
@@ -62,7 +62,7 @@ export default function Sidebar() {
 
       {sidebarTab === "holds" && <SidebarHoldsTab />}
 
-      {(sidebarTab as string) === "event" && <SidebarEventPanel />}
+      {sidebarTab === "event" && <SidebarEventPanel />}
 
     </aside>
   );

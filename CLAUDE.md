@@ -14,9 +14,10 @@
 | Client | React 18 + TypeScript + Vite |
 | Server | Node.js + Express + TypeScript |
 | Realtime | Socket.io (WebSocket seat locking) |
-| Database | PostgreSQL via Prisma ORM |
+| Database | PostgreSQL via Prisma ORM (Neon serverless in production) |
 | Gestures | @use-gesture/react (pan, pinch, scroll zoom) |
 | Validation | Zod |
+| Auth | jsonwebtoken (JWT HS256, 1-hour expiry) |
 | Monorepo | npm workspaces |
 
 ---
@@ -32,12 +33,13 @@ seating-test1/
 │   │   │   └── index.ts           # Express REST API + Socket.io seat locking
 │   │   ├── prisma/
 │   │   │   └── schema.prisma      # Full DB schema
+│   │   ├── railway.json           # Railway build + deploy config
 │   │   ├── tsconfig.json
-│   │   └── .env                   # DATABASE_URL, CLIENT_URL, PORT
+│   │   └── .env                   # DATABASE_URL, CLIENT_URL, PORT, JWT_SECRET
 │   ├── client/
 │   │   ├── src/
 │   │   │   ├── main.tsx           # React entry point
-│   │   │   ├── App.tsx            # Nav shell
+│   │   │   ├── App.tsx            # Routing shell (token auth + public/admin views)
 │   │   │   ├── index.css
 │   │   │   └── components/
 │   │   │       ├── SeatMap.tsx    # Customer-facing seat map renderer
@@ -45,6 +47,7 @@ seating-test1/
 │   │   │       └── mapeditor/     # All MapEditor sub-components (see below)
 │   │   ├── index.html
 │   │   ├── vite.config.ts         # proxies /api -> localhost:3001
+│   │   ├── vercel.json            # rewrites /api/* -> Railway URL
 │   │   ├── tsconfig.json
 │   │   └── .env                   # VITE_API_URL
 │   └── shared/
@@ -55,13 +58,13 @@ seating-test1/
 
 ## MapEditor architecture
 
-MapEditor.tsx is now a thin wrapper (~20 lines). All state and logic lives in sub-modules:
+MapEditor.tsx is a thin wrapper (~20 lines). All state and logic lives in sub-modules:
 
 ```
 components/mapeditor/
 ├── types.tsx              # All types, constants, and pure helper functions
 ├── styles.ts              # Shared CSS style constants (inp, pbtn, sbtn, dbtn, zbtn)
-├── useMapEditorState.ts   # Custom hook — all state, refs, effects, handlers (~2400 lines)
+├── useMapEditorState.ts   # Custom hook — all state, refs, effects, handlers
 ├── MapEditorContext.tsx   # React Context wrapping useMapEditorState return type
 ├── Sidebar.tsx            # <aside> shell — tab bar, focus banner, renders sub-panels
 ├── CanvasSVG.tsx          # Full SVG canvas — all section type renderers, zoom controls
@@ -69,6 +72,7 @@ components/mapeditor/
 ├── SidebarEditorTools.tsx # Tool buttons (Select/Table/Object/Text/GA/Seated), file imports
 ├── SidebarInspectors.tsx  # Section, table, text, venue object inspectors + row generator
 ├── SidebarHoldsTab.tsx    # Holds management tab
+├── SidebarEventPanel.tsx  # Schedule tab: event name, map slot, publish toggle, date pickers
 ├── ZonesPanel.tsx         # Pricing zones list + new zone form
 ├── CanvasOverlays.tsx     # Floating popups: seat rename, row edit, table popup, text widget
 └── ImportModal.tsx        # PSD/DXF/Image import preview modal
@@ -82,49 +86,118 @@ components/mapeditor/
 
 **Seat zone enforcement (SeatMap):** Seats with no pricing zone assigned cannot be selected in the customer-facing map view.
 
+**Schedule tab (`SidebarEventPanel`):** Shows event name, map slot, "Active now" indicator, `isPublished` toggle, `datetime-local` pickers for `scheduledStartAt`/`scheduledEndAt`, and a "Save Schedule" button that calls `saveSchedule()` → `PATCH /api/maps/:id/schedule`.
+
+**Batch API — no N+1 calls:** All hot paths in `useMapEditorState.ts` use batch endpoints. Individual seat/row/section loops have been eliminated:
+
+| Operation | Endpoint used |
+|---|---|
+| Seat drag release | `PATCH /api/sections/:id/seats/positions` |
+| Generate rows | `POST /api/sections/:id/rows/batch` |
+| Create seated section | `POST /api/sections/:id/rows/batch` |
+| Apply global curve/skew | `PATCH /api/sections/:id/rows/transform` |
+| Bake row transforms | `PATCH /api/sections/:id/seats/positions` |
+| Delete selected seats | `DELETE /api/sections/:id/seats/batch` |
+| Delete multi-selected sections | `DELETE /api/sections/batch` |
+| Update table chair positions | `PATCH /api/sections/:id/seats/positions` |
+| Paste sections (rows) | `POST /api/sections/:id/rows/batch` |
+| Fill gaps | `PATCH /api/sections/:id/seats/positions` |
+| Sync history (deletes) | `DELETE /api/sections/batch` |
+| Sync history (patches) | `Promise.all` of concurrent `PATCH /api/sections/:id` |
+
 ---
 
 ## Data model (Prisma)
 
+`Event` is the top-level entity. Each event owns up to 3 `VenueMap`s. Only one map is active at a time, resolved by schedule window + `isPublished`.
+
 ```
 Venue
- └── VenueMap          (svgViewBox, bgImageUrl, isPublished)
-      ├── Section[]     (polygonPath, sectionType: RESERVED|GA|ACCESSIBLE|RESTRICTED|TABLE|TEXT|STAGE|BAR|…)
-      │    └── Row[]
-      │         └── Seat[]   (x, y, seatNumber, notes: JSON with shape + zoneId)
-      ├── PricingZone[] (name, color hex, sortOrder)
-      │    └── SectionZoneMapping (many-to-many Section <-> Zone)
-      ├── MapHold[]     (name, color — blocks seats for organizer holds)
-      └── Event[]
-           ├── TicketType[] (price in cents, currency, maxPerOrder)
-           └── SeatInventory[]  (status: AVAILABLE|HELD|RESERVED|SOLD|BLOCKED)
+ └── Event[]       (name, venueId optional)
+      └── VenueMap[]  (mapSlot: 1|2|3, scheduledStartAt?, scheduledEndAt?, isPublished, svgViewBox, bgImageUrl)
+           ├── Section[]   (polygonPath, sectionType: RESERVED|GA|ACCESSIBLE|RESTRICTED|TABLE|TEXT|STAGE|BAR|…)
+           │    └── Row[]
+           │         └── Seat[]   (x, y, seatNumber, notes: JSON with shape + zoneId)
+           ├── PricingZone[]  (name, color hex, sortOrder)
+           │    └── SectionZoneMapping (many-to-many Section <-> Zone)
+           ├── MapHold[]      (name, color — blocks seats for organizer holds)
+           ├── TicketType[]   (price in cents, currency, maxPerOrder)
+           └── SeatInventory[] (status: AVAILABLE|HELD|RESERVED|SOLD|BLOCKED)
 ```
+
+**Active map resolution** (`resolveActiveMap()` in `index.ts`):
+1. First published map whose schedule window contains `now`
+2. Fallback: first published map by `mapSlot`
+3. Fallback: first map by `mapSlot` (unpublished, for editor preview)
 
 ---
 
 ## REST API routes
 
+### Auth
+| Method | Path | Description |
+|---|---|---|
+| POST | /api/auth/token | Create signed JWT `{ eventId }` — 1hr expiry |
+| GET | /api/auth/verify | Verify token, returns `{ eventId }` |
+
+### Venues
 | Method | Path | Description |
 |---|---|---|
 | GET | /api/venues | List all venues |
 | POST | /api/venues | Create venue |
+
+### Events
+| Method | Path | Description |
+|---|---|---|
+| GET | /api/events | List all events (with venue + map count) |
+| POST | /api/events | Create event (`{ name, venueId? }`) |
+| GET | /api/events/:id/active-map | Returns active map ID for the event |
+| POST | /api/events/:id/maps | Create a new map for event (max 3, body: `{ mapSlot }`) |
+
+### Maps
+| Method | Path | Description |
+|---|---|---|
 | GET | /api/maps/:id | Full map with sections, rows, seats, zones, holds |
-| POST | /api/venues/:id/maps | Create map for venue |
 | PATCH | /api/maps/:id/publish | Toggle isPublished |
+| PATCH | /api/maps/:id/schedule | Set `scheduledStartAt`, `scheduledEndAt`, `isPublished` |
 | POST | /api/maps/:id/sections | Create section |
-| PATCH | /api/sections/:id | Update section |
-| DELETE | /api/sections/:id | Delete section |
-| PATCH | /api/sections/:id/rotate | Rotate polygon + all seat positions |
-| PATCH | /api/sections/:id/move | Bulk-move polygon + seats by delta |
-| POST | /api/sections/:id/rows | Create row + seats |
 | GET | /api/maps/:id/zones | List pricing zones |
 | POST | /api/maps/:id/zones | Create pricing zone |
-| PUT | /api/sections/:id/zone | Assign zone to section |
-| GET | /api/events/:id/inventory | Compact {seatId: status} snapshot |
+| POST | /api/maps/:id/seats/batch-zone | Assign zone to multiple seats |
 | POST | /api/maps/:id/analyze-psd | Proxy PSD to Python analyzer |
 | POST | /api/maps/:id/analyze-dxf | Proxy DXF/DWG to Python analyzer |
 | POST | /api/maps/:id/analyze-image | Proxy PNG/JPEG to Python analyzer |
 | POST | /api/maps/:id/import-sections | Bulk-create sections from analyzer result |
+
+### Sections
+| Method | Path | Description |
+|---|---|---|
+| PATCH | /api/sections/:id | Update section |
+| DELETE | /api/sections/:id | Delete section |
+| PATCH | /api/sections/:id/rotate | Rotate polygon + all seat positions |
+| PATCH | /api/sections/:id/move | Bulk-move polygon + seats by delta |
+| POST | /api/sections/:id/rows | Create single row + seats |
+| POST | /api/sections/:id/rows/batch | Batch-create rows + seats (returns with DB IDs) |
+| PATCH | /api/sections/:id/rows/transform | Set curve/skew on all rows via `updateMany` |
+| PATCH | /api/sections/:id/seats/positions | Batch-update seat x/y positions |
+| DELETE | /api/sections/:id/seats/batch | Batch-delete seats by ID list |
+| DELETE | /api/sections/batch | Batch-delete sections (body: `{ sectionIds }`) |
+| PUT | /api/sections/:id/zone | Assign zone to section |
+
+### Events / Inventory
+| Method | Path | Description |
+|---|---|---|
+| GET | /api/events/:id/inventory | Compact `{seatId: status}` snapshot |
+
+---
+
+## App.tsx routing
+
+- **No `?token=`** → auto-detect first published event → resolve active map → `<SeatMap>` fullscreen (public customer view)
+- **`?event=eventId`** → that event's active map → `<SeatMap>` fullscreen
+- **`?token=xxx`** → verify JWT → full admin UI with event selector, map slot tabs, and `<MapEditor>` (organizer-only)
+
+Admin UI features: event selector dropdown, map slot tabs (Map 1/2/3 with green dot on published), "+ Event" and "+ Map" modal forms.
 
 ---
 
@@ -192,18 +265,32 @@ Section types: RESERVED, GA, ACCESSIBLE, RESTRICTED, TABLE, TEXT, STAGE, BAR, BA
 
 ## Environment variables
 
-### packages/server/.env
+### packages/server/.env (local)
 ```
 DATABASE_URL="postgresql://ahmadalhaich@localhost:5432/tickit"
 CLIENT_URL="http://localhost:5173"
 PORT=3001
 ANALYZER_URL=http://127.0.0.1:8001
+JWT_SECRET=your-secret-here
 ```
 
-### packages/client/.env
+### packages/client/.env (local)
 ```
 VITE_API_URL=http://localhost:3001
 ```
+
+### Production (Railway)
+Set in Railway dashboard: `DATABASE_URL` (Neon), `CLIENT_URL` (Vercel URL), `JWT_SECRET`, `PORT`.
+`prisma` must be in `dependencies` (not `devDependencies`) — required for Railway production install.
+
+---
+
+## Deployment
+
+- **Server**: Railway — `packages/server/railway.json` configures build + start command
+  - Build: `npm install && npx prisma generate && npm run build`
+  - Start: `cd packages/server && npx prisma migrate deploy && npm start`
+- **Client**: Vercel — `packages/client/vercel.json` rewrites `/api/*` to Railway URL
 
 ---
 
@@ -254,10 +341,8 @@ URLs:
 - Warns at 2:00 remaining
 - Auto-releases all held seats on expiry
 
-### 3. Event + seed routes
-- POST /api/events
-- POST /api/events/:id/ticket-types
-- `packages/server/prisma/seed.ts` — test venue + map + event + inventory
+### 3. Seed script
+- `packages/server/prisma/seed.ts` — test venue + event + map + ticket types + inventory
 
 ### 4. Shared types
 Move SeatStatus, SeatInventory, FullMap types from SeatMap.tsx into
@@ -271,7 +356,6 @@ Local OpenCV + K-means + rules pipeline so image analysis works without Claude A
 
 ## Known gaps
 
-- No user authentication yet — add JWT middleware to server when ready
 - `seat:hold` upsert needs a Prisma transaction with `WHERE status = AVAILABLE` to prevent race conditions under high concurrency
 - SeatMap.tsx imports Prisma types directly — move to shared package
 - No React error boundaries yet

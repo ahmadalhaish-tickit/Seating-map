@@ -11,6 +11,7 @@ import {
 
 export default function CanvasSVG() {
   const {
+    loading,
     transform, tool, sections, selected, multiSelected, focusedSection,
     drawing, mouse, zones, holds, sidebarTab, seatRadius, seatShape,
     selectedSeats, setSelectedSeats, marqueeRect, tableDraft,
@@ -20,7 +21,7 @@ export default function CanvasSVG() {
     sectionDragState, seatDragState, hasDragged, selectedSeatsRef,
     setSelected, hoveredSeat, setHoveredSeat,
     handleMouseDown, handleMouseMove, handleMouseUp, handleDoubleClick, handleMouseLeave,
-    finishPolygon, zoom, resetZoom, canvasCursor,
+    finishPolygon, zoom, fitToContent, canvasCursor,
     setDrawing, setTool,
   } = useMapEditorContext();
 
@@ -822,7 +823,7 @@ export default function CanvasSVG() {
 
       {/* Zoom controls */}
       <div style={{ position: "absolute", bottom: 16, right: 16, display: "flex", flexDirection: "column", gap: 6 }}>
-        {([["＋", () => zoom(1.25)], ["↺", resetZoom], ["－", () => zoom(0.8)]] as [string, () => void][]).map(([label, fn]) => (
+        {([["＋", () => zoom(1.25)], ["⊡", fitToContent], ["－", () => zoom(0.8)]] as [string, () => void][]).map(([label, fn]) => (
           <button key={label} onClick={fn} style={zbtn}>{label}</button>
         ))}
       </div>
@@ -856,6 +857,14 @@ export default function CanvasSVG() {
       )}
 
       <CanvasOverlays />
+
+      {loading && (
+        <div style={{ position: "absolute", inset: 0, background: "rgba(17,17,17,0.85)", display: "flex", flexDirection: "column", alignItems: "center", justifyContent: "center", gap: 16, zIndex: 50 }}>
+          <style>{`@keyframes _spin{to{transform:rotate(360deg)}}`}</style>
+          <div style={{ width: 36, height: 36, borderRadius: "50%", border: "3px solid #333", borderTopColor: "#a09ce8", animation: "_spin 0.8s linear infinite" }} />
+          <span style={{ fontSize: 13, color: "#888" }}>Loading map…</span>
+        </div>
+      )}
     </div>
   );
 }
