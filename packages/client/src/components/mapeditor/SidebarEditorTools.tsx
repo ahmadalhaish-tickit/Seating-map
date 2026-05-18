@@ -3,7 +3,7 @@ import { sbtn, inp } from "./styles.ts";
 import { VENUE_OBJECT_CFG, VENUE_OBJECT_TYPES, VenueObjectType, renderVenueIcon } from "./types.tsx";
 
 const PRESET_ICONS = VENUE_OBJECT_TYPES
-  .filter(t => t !== "WALL" && t !== "DOOR" && t !== "STAIRS")
+  .filter(t => t !== "WALL" && t !== "DOOR" && t !== "STAIRS" && t !== "TRACK")
   .map(t => ({ id: `preset:${t}` as string, label: VENUE_OBJECT_CFG[t].label, type: t as VenueObjectType }));
 
 export default function SidebarEditorTools() {
@@ -33,7 +33,7 @@ export default function SidebarEditorTools() {
             )))}
           </div>
           <div style={{ marginTop: 8, display: "flex", gap: 6 }}>
-            {(([["polygon","GA Section"],["seated","Seated"]] as [typeof tool, string][]).map(([t, label]) => (
+            {(([["polygon","GA Section"],["seated","Seated"],["track","Curve Line"]] as [typeof tool, string][]).map(([t, label]) => (
               <button key={t} onClick={() => { setTool(t); setDrawing([]); setTableDraft(null); setSeatedPlacement(null); }} style={{
                 flex: 1, padding: "6px 4px", borderRadius: 6, fontSize: 12, cursor: "pointer", border: "1px solid",
                 borderColor: tool === t ? "#27AE60" : "#444",
@@ -45,6 +45,9 @@ export default function SidebarEditorTools() {
           </div>
           {(tool === "polygon" || tool === "object") && drawing.length === 0 && (
             <p style={{ fontSize: 11, color: "#666", marginTop: 8, marginBottom: 0 }}>Click canvas to place points. Click near start to close.</p>
+          )}
+          {tool === "track" && drawing.length === 0 && (
+            <p style={{ fontSize: 11, color: "#666", marginTop: 8, marginBottom: 0 }}>Click canvas to place curve points. Double-click to finish.</p>
           )}
           {tool === "seated" && !seatedPlacement && (
             <p style={{ fontSize: 11, color: "#666", marginTop: 8, marginBottom: 0 }}>Configure rows below, then click canvas to place.</p>

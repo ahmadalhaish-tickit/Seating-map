@@ -3,7 +3,7 @@ import React from "react";
 // ── Types ──────────────────────────────────────────────────────────────────
 export type SeatShapeType = "circle" | "square" | "triangle" | "chair" | "wheelchair";
 export type TableShape = "rectangle" | "round" | "square" | "oval" | "booth";
-export interface TableMeta { shape: TableShape; w: number; h: number; cpl: number; cps: number; angle: number; selectMode?: "whole" | "seat" }
+export interface TableMeta { shape: TableShape; w: number; h: number; cpl: number; cps: number; angle: number; selectMode?: "whole" | "seat"; sides?: "all" | "one" }
 export interface DoorMeta { w: number; h: number; angle: number }
 
 export interface Point { x: number; y: number }
@@ -39,6 +39,7 @@ export interface DraftSection {
   customSvg?: string;    // data URL or "preset:TYPE" or "none" — marks this as a custom object
   customColor?: string;  // hex color override for the polygon fill/stroke/icon (custom objects)
   noOrphanSeats?: boolean; // SeatMap: prevent leaving a single isolated available seat in a row
+  floor: number;           // which venue floor this section belongs to (1 = main floor)
 }
 export interface Zone { id: string; name: string; color: string }
 export interface MapHold { id: string; name: string; color: string; seats: { seatId: string }[] }
@@ -46,10 +47,10 @@ export interface MapEditorProps {
   mapId: string; svgViewBox: string;
   bgImageUrl?: string; initialZones?: Zone[];
 }
-export type Tool = "select" | "polygon" | "seated" | "table" | "object" | "text";
+export type Tool = "select" | "polygon" | "seated" | "table" | "object" | "text" | "track";
 
 // ── Venue object types ─────────────────────────────────────────────────────
-export const VENUE_OBJECT_TYPES = ["STAGE","BAR","BATHROOM","DANCING","PARKING","STAIRS","WALL","DOOR","CHECKIN"] as const;
+export const VENUE_OBJECT_TYPES = ["STAGE","BAR","BATHROOM","DANCING","PARKING","STAIRS","WALL","DOOR","CHECKIN","TRACK"] as const;
 export type VenueObjectType = typeof VENUE_OBJECT_TYPES[number];
 export const VENUE_OBJECT_CFG: Record<VenueObjectType, { label: string; color: string }> = {
   STAGE:    { label: "Stage",       color: "#C49A3C" },
@@ -61,6 +62,7 @@ export const VENUE_OBJECT_CFG: Record<VenueObjectType, { label: string; color: s
   WALL:     { label: "Wall",        color: "#555566" },
   DOOR:     { label: "Door",        color: "#E67E22" },
   CHECKIN:  { label: "Check-in",    color: "#E74C3C" },
+  TRACK:    { label: "Curve Line",  color: "#222233" },
 };
 export function isVenueObject(type: string): type is VenueObjectType {
   if (type === "TEXT") return false;
@@ -145,6 +147,21 @@ export function curvedPath(pts: Point[], curve: number): string {
     const cpX = mx + curve * (-dy / len);
     const cpY = my + curve * (dx / len);
     d += ` Q ${cpX} ${cpY} ${p2.x} ${p2.y}`;
+  }
+  return d;
+}
+
+// ── Catmull-rom spline: N control points → smooth open SVG path ───────────
+export function catmullRomSVG(pts: Point[]): string {
+  if (pts.length < 2) return "";
+  if (pts.length === 2) return `M ${pts[0].x} ${pts[0].y} L ${pts[1].x} ${pts[1].y}`;
+  const ext = [pts[0], ...pts, pts[pts.length - 1]];
+  let d = `M ${pts[0].x} ${pts[0].y}`;
+  for (let i = 0; i < pts.length - 1; i++) {
+    const p0 = ext[i], p1 = ext[i + 1], p2 = ext[i + 2], p3 = ext[i + 3];
+    const cp1x = p1.x + (p2.x - p0.x) / 6, cp1y = p1.y + (p2.y - p0.y) / 6;
+    const cp2x = p2.x - (p3.x - p1.x) / 6, cp2y = p2.y - (p3.y - p1.y) / 6;
+    d += ` C ${cp1x} ${cp1y} ${cp2x} ${cp2y} ${p2.x} ${p2.y}`;
   }
   return d;
 }
@@ -261,6 +278,32 @@ export function computeChairPositions(meta: TableMeta, cx: number, cy: number): 
   const hw = w / 2, hh = h / 2;
   const GAP = 14;
   const pts: Point[] = [];
+
+  if (meta.sides === "one") {
+    if (shape === "round" || shape === "oval") {
+      const count = Math.max(1, cpl);
+      const rx = (shape === "oval" ? hw : Math.min(hw, hh)) + GAP;
+      const ry = (shape === "oval" ? hh : Math.min(hw, hh)) + GAP;
+      // distribute evenly across bottom semicircle (0 → π), excluding endpoints
+      for (let i = 0; i < count; i++) {
+        const a = ((i + 1) / (count + 1)) * Math.PI;
+        pts.push({ x: cx + rx * Math.cos(a), y: cy + ry * Math.sin(a) });
+      }
+    } else {
+      // rectangle / square / booth — seats on front (bottom) edge only
+      const s = shape === "square" ? Math.min(hw, hh) : hw;
+      const t = shape === "square" ? Math.min(hw, hh) : hh;
+      const total = Math.max(0, cpl);
+      if (total > 0) {
+        const step = (s * 2) / (total + 1);
+        for (let i = 1; i <= total; i++) {
+          pts.push({ x: cx - s + i * step, y: cy + t + GAP });
+        }
+      }
+    }
+    return rotateAround(pts, cx, cy, meta.angle);
+  }
+
   if (shape === "round" || shape === "oval") {
     const count = Math.max(1, cpl);
     const rx = (shape === "oval" ? hw : Math.min(hw, hh)) + GAP;
@@ -380,6 +423,39 @@ export function renderTableGraphic(
           ))}
         </g>
       )}
+      {/* One-sided front-edge indicator */}
+      {meta.sides === "one" && (() => {
+        const r = Math.min(hw, hh);
+        if (meta.shape === "round") {
+          return (
+            <path
+              d={`M ${cx - r} ${cy} A ${r} ${r} 0 0 0 ${cx + r} ${cy}`}
+              transform={`rotate(${meta.angle}, ${cx}, ${cy})`}
+              fill="none" stroke={color} strokeWidth={3}
+              strokeLinecap="round" style={{ pointerEvents: "none" }} />
+          );
+        }
+        if (meta.shape === "oval") {
+          return (
+            <path
+              d={`M ${cx - hw} ${cy} A ${hw} ${hh} 0 0 0 ${cx + hw} ${cy}`}
+              transform={`rotate(${meta.angle}, ${cx}, ${cy})`}
+              fill="none" stroke={color} strokeWidth={3}
+              strokeLinecap="round" style={{ pointerEvents: "none" }} />
+          );
+        }
+        const s = meta.shape === "square" ? Math.min(hw, hh) : hw;
+        const t = meta.shape === "square" ? Math.min(hw, hh) : hh;
+        const rx2 = Math.min(10, s * 0.2, t * 0.2);
+        return (
+          <line
+            x1={cx - s + rx2} y1={cy + t}
+            x2={cx + s - rx2} y2={cy + t}
+            transform={`rotate(${meta.angle}, ${cx}, ${cy})`}
+            stroke={color} strokeWidth={3}
+            strokeLinecap="round" style={{ pointerEvents: "none" }} />
+        );
+      })()}
       {/* Table label */}
       <text x={cx} y={cy} textAnchor="middle" dominantBaseline="central"
         transform={`rotate(${meta.angle}, ${cx}, ${cy})`}

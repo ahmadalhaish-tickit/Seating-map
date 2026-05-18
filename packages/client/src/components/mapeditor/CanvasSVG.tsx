@@ -6,7 +6,7 @@ import {
   isVenueObject, VenueObjectType, VENUE_OBJECT_CFG,
   getDisplaySeats, renderSeat, renderTableGraphic, renderVenueIcon,
   computeChairPositions, labelFontSize, polyBBox, curvedBBox, polyArea,
-  centroid, pointsToPath, curvedPath,
+  centroid, pointsToPath, curvedPath, catmullRomSVG,
 } from "./types.tsx";
 
 export default function CanvasSVG() {
@@ -21,9 +21,13 @@ export default function CanvasSVG() {
     sectionDragState, seatDragState, hasDragged, selectedSeatsRef,
     setSelected, hoveredSeat, setHoveredSeat,
     handleMouseDown, handleMouseMove, handleMouseUp, handleDoubleClick, handleMouseLeave,
-    finishPolygon, zoom, fitToContent, canvasCursor,
+    finishPolygon, finishTrack, zoom, fitToContent, canvasCursor,
     setDrawing, setTool,
+    activeFloor, floorNames, switchFloor, addFloor,
   } = useMapEditorContext();
+
+  // Only render sections on the active floor
+  const visibleSections = sections.filter(s => (s.floor ?? 1) === activeFloor);
 
   // Derived: seatId → hold lookup
   const seatHoldMap = new Map<string, MapHold>();
@@ -53,8 +57,26 @@ export default function CanvasSVG() {
         {bgImageUrl && <image href={bgImageUrl} x="0" y="0" width={vw} height={vh} opacity={0.35} preserveAspectRatio="xMidYMid meet" />}
         <rect x="-50000" y="-50000" width="100000" height="100000" fill="url(#grid)" />
 
+        {/* Ghost floors — non-active floors shown dimmed behind active floor */}
+        {Object.keys(floorNames).length > 1 && sections
+          .filter(s => (s.floor ?? 1) !== activeFloor)
+          .map(s => {
+            if (s.sectionType === "TEXT") return null;
+            if (s.sectionType === "TRACK") {
+              if (s.points.length < 2) return null;
+              return <path key={s.id} d={catmullRomSVG(s.points)} fill="none" stroke="#888" strokeWidth={3 / transform.scale} strokeLinecap="round" strokeLinejoin="round" opacity={0.18} style={{ pointerEvents: "none" }} />;
+            }
+            if (s.sectionType === "WALL") {
+              const [p1, p2] = s.points;
+              if (!p1 || !p2) return null;
+              return <line key={s.id} x1={p1.x} y1={p1.y} x2={p2.x} y2={p2.y} stroke="#888" strokeWidth={4 / transform.scale} strokeLinecap="round" opacity={0.18} style={{ pointerEvents: "none" }} />;
+            }
+            return <path key={s.id} d={pointsToPath(s.points)} fill="#888" stroke="#666" strokeWidth={0.5 / transform.scale} opacity={0.13} style={{ pointerEvents: "none" }} />;
+          })
+        }
+
         {/* Sections — rendered back-to-front: large venue objects first, tables last */}
-        {[...sections].sort((a, b) => {
+        {[...visibleSections].sort((a, b) => {
           const order = (t: string) =>
             t === "TABLE" ? 3 :
             t === "RESERVED" || t === "GA" || t === "ACCESSIBLE" || t === "RESTRICTED" ? 2 :
@@ -142,6 +164,31 @@ export default function CanvasSVG() {
                   </g>
                 ))}
                 {!s.saved && <text x={(p1.x+p2.x)/2} y={(p1.y+p2.y)/2 - 12/transform.scale} textAnchor="middle" fontSize={10/transform.scale} fill={color+"88"} style={{ pointerEvents:"none", userSelect:"none" }}>unsaved</text>}
+              </g>
+            );
+          }
+
+          // TRACK — smooth catmull-rom curve line
+          if (s.sectionType === "TRACK") {
+            if (s.points.length < 2) return null;
+            const d = catmullRomSVG(s.points);
+            const sw = (isSel ? 6 : 4) / transform.scale;
+            const mid = s.points[Math.floor(s.points.length / 2)];
+            return (
+              <g key={s.id} data-section-id={s.id}
+                style={{ cursor: tool === "select" ? "pointer" : "default", opacity: isDimmed ? 0.12 : 1 }}>
+                <path d={d} fill="none" stroke="transparent" strokeWidth={22 / transform.scale} />
+                {isSel && <path d={d} fill="none" stroke={color} strokeWidth={14 / transform.scale} strokeLinecap="round" strokeLinejoin="round" opacity={0.18} style={{ pointerEvents: "none" }} />}
+                <path d={d} fill="none" stroke={color} strokeWidth={sw} strokeLinecap="round" strokeLinejoin="round"
+                  strokeDasharray={s.saved ? "none" : `${6 / transform.scale} ${3 / transform.scale}`}
+                  style={{ pointerEvents: "none" }} />
+                {isSel && s.points.map((pt, i) => (
+                  <g key={i} data-vertex-index={i} style={{ cursor: "crosshair" }}>
+                    <circle cx={pt.x} cy={pt.y} r={13 / transform.scale} fill="transparent" />
+                    <circle cx={pt.x} cy={pt.y} r={4 / transform.scale} fill="#fff" stroke={color} strokeWidth={1.5 / transform.scale} style={{ pointerEvents: "none" }} />
+                  </g>
+                ))}
+                {!s.saved && <text x={mid.x} y={mid.y - 12 / transform.scale} textAnchor="middle" fontSize={10 / transform.scale} fill={color + "88"} style={{ pointerEvents: "none", userSelect: "none" }}>unsaved</text>}
               </g>
             );
           }
@@ -806,20 +853,46 @@ export default function CanvasSVG() {
           );
         })()}
 
-        {/* Polygon in-progress */}
+        {/* Polygon / Track in-progress */}
         {drawing.length > 0 && (
           <g style={{ pointerEvents: "none" }}>
-            <polyline
-              points={[...drawing, mouse ?? drawing[drawing.length - 1]].map(p => `${p.x},${p.y}`).join(" ")}
-              fill="none" stroke="#7F77DD" strokeWidth={1.5} strokeDasharray="6 3" />
+            {tool === "track" ? (
+              <path
+                d={catmullRomSVG([...drawing, ...(mouse ? [mouse] : [])])}
+                fill="none" stroke="#222233" strokeWidth={4 / transform.scale}
+                strokeLinecap="round" strokeLinejoin="round"
+                strokeDasharray={`${6 / transform.scale} ${3 / transform.scale}`} />
+            ) : (
+              <polyline
+                points={[...drawing, mouse ?? drawing[drawing.length - 1]].map(p => `${p.x},${p.y}`).join(" ")}
+                fill="none" stroke="#7F77DD" strokeWidth={1.5} strokeDasharray="6 3" />
+            )}
             {drawing.map((pt, i) => (
-              <circle key={i} cx={pt.x} cy={pt.y} r={i === 0 ? 6 : 4}
-                fill={i === 0 ? "#7F77DD" : "#2d2a5e"} stroke="#7F77DD" strokeWidth={1} />
+              <circle key={i} cx={pt.x} cy={pt.y}
+                r={(tool === "track" ? 4 : i === 0 ? 6 : 4) / transform.scale}
+                fill={tool === "track" ? "#222233" : (i === 0 ? "#7F77DD" : "#2d2a5e")}
+                stroke={tool === "track" ? "#555566" : "#7F77DD"} strokeWidth={1 / transform.scale} />
             ))}
           </g>
         )}
         </g>
       </svg>
+
+      {/* Floor tabs */}
+      {!focusedSection && (
+        <div style={{ position: "absolute", top: 12, left: "50%", transform: "translateX(-50%)", display: "flex", gap: 4, zIndex: 10, background: "rgba(17,17,17,0.88)", borderRadius: 8, padding: "4px 6px", border: "1px solid #333", pointerEvents: "auto" }}>
+          {Object.entries(floorNames).sort(([a], [b]) => +a - +b).map(([num, name]) => (
+            <button key={num} onClick={() => switchFloor(+num)} style={{
+              padding: "5px 14px", borderRadius: 6, fontSize: 12, cursor: "pointer", border: "1px solid",
+              borderColor: activeFloor === +num ? "#534AB7" : "transparent",
+              background: activeFloor === +num ? "#2d2a5e" : "transparent",
+              color: activeFloor === +num ? "#a09ce8" : "#888",
+              fontWeight: activeFloor === +num ? 600 : 400,
+            }}>{name}</button>
+          ))}
+          <button onClick={addFloor} title="Add floor" style={{ padding: "5px 10px", borderRadius: 6, fontSize: 13, cursor: "pointer", border: "1px solid #444", background: "transparent", color: "#666" }}>+</button>
+        </div>
+      )}
 
       {/* Zoom controls */}
       <div style={{ position: "absolute", bottom: 16, right: 16, display: "flex", flexDirection: "column", gap: 6 }}>
@@ -844,6 +917,11 @@ export default function CanvasSVG() {
           Click to place points · Double-click or click first point to close
         </div>
       )}
+      {tool === "track" && drawing.length === 0 && !focusedSection && (
+        <div style={{ position: "absolute", bottom: 20, left: "50%", transform: "translateX(-50%)", background: "rgba(0,0,0,0.75)", color: "#ccc", padding: "8px 18px", borderRadius: 20, fontSize: 12, pointerEvents: "none" }}>
+          Click to place curve points · Double-click to finish
+        </div>
+      )}
       {tool === "table" && !tableDraft && (
         <div style={{ position: "absolute", bottom: 20, left: "50%", transform: "translateX(-50%)", background: "rgba(83,74,183,0.85)", color: "#fff", padding: "8px 18px", borderRadius: 20, fontSize: 12, pointerEvents: "none" }}>
           Click-drag to size table · Release to place
@@ -852,6 +930,12 @@ export default function CanvasSVG() {
       {tool === "polygon" && drawing.length > 0 && (
         <div style={{ position: "absolute", bottom: 20, right: 60, display: "flex", gap: 8 }}>
           <button onClick={finishPolygon} style={pbtn}>Close polygon</button>
+          <button onClick={() => { setDrawing([]); setTool("select"); }} style={sbtn}>Cancel</button>
+        </div>
+      )}
+      {tool === "track" && drawing.length > 0 && (
+        <div style={{ position: "absolute", bottom: 20, right: 60, display: "flex", gap: 8 }}>
+          <button onClick={finishTrack} style={pbtn}>Finish curve</button>
           <button onClick={() => { setDrawing([]); setTool("select"); }} style={sbtn}>Cancel</button>
         </div>
       )}

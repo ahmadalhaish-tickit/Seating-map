@@ -29,6 +29,8 @@ export function useMapEditorState({ mapId, svgViewBox, bgImageUrl, initialZones 
   const [activeHoldId, setActiveHoldId] = useState<string | null>(null);
   const [holdEditDraft, setHoldEditDraft] = useState<{ id: string; name: string; color: string } | null>(null);
   const [sidebarTab, setSidebarTab]   = useState<"editor" | "holds" | "event">("editor");
+  const [activeFloor, setActiveFloor] = useState(1);
+  const [floorNames, setFloorNames]   = useState<Record<string, string>>({ "1": "Main Floor" });
   const [showRows, setShowRows]       = useState(false);
   const [loading, setLoading]         = useState(true);
   const [saving, setSaving]           = useState(false);
@@ -41,7 +43,7 @@ export function useMapEditorState({ mapId, svgViewBox, bgImageUrl, initialZones 
   const [editingSeat, setEditingSeat] = useState<{ id: string; value: string; shape: SeatShapeType; sectionId: string; screenX: number; screenY: number } | null>(null);
   const [editingRow, setEditingRow]   = useState<{ id: string; value: string; screenX: number; screenY: number } | null>(null);
   // Table tool state
-  const [tableCfg, setTableCfg] = useState<TableMeta>({ shape: "rectangle", w: 120, h: 60, cpl: 4, cps: 2, angle: 0 });
+  const [tableCfg, setTableCfg] = useState<TableMeta>({ shape: "rectangle", w: 120, h: 60, cpl: 4, cps: 2, angle: 0, sides: "all" });
   const [tableDraft, setTableDraft] = useState<{ startPt: Point; endPt: Point } | null>(null);
   const [editingTable, setEditingTable] = useState<{ sectionId: string; screenX: number; screenY: number } | null>(null);
   // Object tool draft config (sidebar, before drawing)
@@ -101,6 +103,7 @@ export function useMapEditorState({ mapId, svgViewBox, bgImageUrl, initialZones 
   const multiSelectedRef = useRef(multiSelected);
   const sidebarTabRef    = useRef(sidebarTab);
   const activeHoldIdRef  = useRef(activeHoldId);
+  const activeFloorRef   = useRef(activeFloor);
 
   useEffect(() => { transformRef.current     = transform;      }, [transform]);
   useEffect(() => { sectionsRef.current      = sections;       }, [sections]);
@@ -115,6 +118,7 @@ export function useMapEditorState({ mapId, svgViewBox, bgImageUrl, initialZones 
   useEffect(() => { multiSelectedRef.current = multiSelected;  }, [multiSelected]);
   useEffect(() => { sidebarTabRef.current    = sidebarTab;     }, [sidebarTab]);
   useEffect(() => { activeHoldIdRef.current  = activeHoldId;   }, [activeHoldId]);
+  useEffect(() => { activeFloorRef.current   = activeFloor;    }, [activeFloor]);
 
   // Undo / redo history (refs so pushing doesn't trigger re-render)
   const undoStack = useRef<DraftSection[][]>([]);
@@ -217,11 +221,13 @@ export function useMapEditorState({ mapId, svgViewBox, bgImageUrl, initialZones 
           sectionType: DraftSection["sectionType"];
           polygonPath: string;
           notes?: string | null;
+          floor?: number;
           zoneMappings: { zoneId: string }[];
           rows: { id: string; label: string; curve?: number; skew?: number; seats: { id: string; x: number; y: number; seatNumber: string; notes?: string | null }[] }[];
         }[];
         pricingZones: Zone[];
         mapHolds?: MapHold[];
+        floorNames?: string | null;
       }) => {
         setSections(map.sections.map(s => {
           let tableMeta: TableMeta | undefined;
@@ -349,6 +355,7 @@ export function useMapEditorState({ mapId, svgViewBox, bgImageUrl, initialZones 
           // tableMeta dimensions, not chair positions. Fitting to chairs shifts the
           // computed center for asymmetric chair counts, causing the table surface to
           // render offset and cover chairs that should be outside it.
+          floor: s.floor ?? 1,
           points: (() => {
             if (s.sectionType === "TABLE") return pathToPoints(s.polygonPath);
             const rawSeats = s.rows.flatMap(row =>
@@ -369,6 +376,7 @@ export function useMapEditorState({ mapId, svgViewBox, bgImageUrl, initialZones 
         }));
         if (map.pricingZones.length > 0) setZones(map.pricingZones);
         if (map.mapHolds) setHolds(map.mapHolds);
+        if (map.floorNames) setFloorNames(JSON.parse(map.floorNames));
         setMapMeta({
           eventId:          map.event?.id   ?? '',
           eventName:        map.event?.name ?? '',
@@ -421,6 +429,43 @@ export function useMapEditorState({ mapId, svgViewBox, bgImageUrl, initialZones 
     }
   };
 
+  // ── Floor management ─────────────────────────────────────────────────
+  const switchFloor = (num: number) => {
+    setActiveFloor(num);
+    activeFloorRef.current = num;
+    requestAnimationFrame(fitToContent);
+  };
+
+  const saveFloorNames = (updated: Record<string, string>) => {
+    setFloorNames(updated);
+    fetch(`/api/maps/${mapId}/floor-names`, {
+      method: "PATCH", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ floorNames: updated }),
+    });
+  };
+
+  const addFloor = () => {
+    const nums = Object.keys(floorNames).map(Number).sort();
+    const next = Math.max(...nums) + 1;
+    const name = next === 2 ? "Balcony" : next === 3 ? "Upper Balcony" : `Floor ${next}`;
+    saveFloorNames({ ...floorNames, [next]: name });
+    switchFloor(next);
+  };
+
+  const renameFloor = (num: number, name: string) => {
+    saveFloorNames({ ...floorNames, [num]: name });
+  };
+
+  const deleteFloor = (num: number) => {
+    if (sectionsRef.current.some(s => (s.floor ?? 1) === num)) return;
+    const nums = Object.keys(floorNames).map(Number);
+    if (nums.length <= 1) return;
+    const updated = { ...floorNames };
+    delete updated[num];
+    saveFloorNames(updated);
+    if (activeFloor === num) switchFloor(Math.min(...Object.keys(updated).map(Number)));
+  };
+
   // ── Undo / Redo helpers ───────────────────────────────────────────────
   const pushHistory = () => {
     const snap = sectionsRef.current.map(s => ({
@@ -469,7 +514,7 @@ export function useMapEditorState({ mapId, svgViewBox, bgImageUrl, initialZones 
       if (e.key === "Escape") {
         if (tableDraftRef.current) { setTableDraft(null); setTool("select"); return; }
         if (focusedRef.current) { exitFocus(); return; }
-        if (toolRef.current === "polygon" || toolRef.current === "object") {
+        if (toolRef.current === "polygon" || toolRef.current === "object" || toolRef.current === "track") {
           setDrawing([]);
           setTool("select");
           return;
@@ -490,7 +535,17 @@ export function useMapEditorState({ mapId, svgViewBox, bgImageUrl, initialZones 
         if (target.tagName === "INPUT" || target.tagName === "TEXTAREA") return;
         const allIds = new Set([...multiSelectedRef.current]);
         if (selectedRef.current) allIds.add(selectedRef.current);
-        clipboardRef.current = sectionsRef.current.filter(s => allIds.has(s.id)).map(s => ({ ...s }));
+        clipboardRef.current = sectionsRef.current.filter(s => allIds.has(s.id)).map(s => ({
+          ...s,
+          points:      s.points.map(p => ({ ...p })),
+          rows:        s.rows?.map(r => ({ ...r })),
+          seats:       s.seats?.map(seat => ({ ...seat })),
+          tableMeta:   s.tableMeta   ? { ...s.tableMeta }   : undefined,
+          doorMeta:    s.doorMeta    ? { ...s.doorMeta }    : undefined,
+          stairsMeta:  s.stairsMeta  ? { ...s.stairsMeta }  : undefined,
+          labelOffset: s.labelOffset ? { ...s.labelOffset } : undefined,
+          iconOffset:  s.iconOffset  ? { ...s.iconOffset }  : undefined,
+        }));
         return;
       }
       // Ctrl+V: paste copied sections
@@ -501,14 +556,43 @@ export function useMapEditorState({ mapId, svgViewBox, bgImageUrl, initialZones 
         if (!toPaste.length) return;
         pushHistory();
         const OFFSET = 20;
-        const newSections: DraftSection[] = toPaste.map(orig => ({
-          ...orig,
-          id: crypto.randomUUID(),
-          saved: false,
-          points: orig.points.map(p => ({ x: p.x + OFFSET, y: p.y + OFFSET })),
-          seats: orig.seats?.map(seat => ({ ...seat, id: crypto.randomUUID(), x: seat.x + OFFSET, y: seat.y + OFFSET })),
-          rows: orig.rows?.map(r => ({ ...r, id: crypto.randomUUID() })),
-        }));
+        const newSections: DraftSection[] = toPaste.map(orig => {
+          const rowIdMap = new Map<string, string>();
+          const newRows = orig.rows?.map(r => {
+            const newId = crypto.randomUUID();
+            rowIdMap.set(r.id, newId);
+            return { ...r, id: newId };
+          });
+          const newSeats = orig.seats?.map(seat => ({
+            ...seat,
+            id: crypto.randomUUID(),
+            x: seat.x + OFFSET,
+            y: seat.y + OFFSET,
+            rowId: rowIdMap.get(seat.rowId) ?? seat.rowId,
+          }));
+          // Recompute polygon from current display seats — the stored polygon may be stale
+          // if seats were dragged after the section was created (seat drag doesn't update points).
+          let newPoints = orig.points.map(p => ({ x: p.x + OFFSET, y: p.y + OFFSET }));
+          if (newSeats && newSeats.length > 0 && newRows && newRows.length > 0) {
+            const disp = getDisplaySeats(newSeats, newRows);
+            const fitted = reshapeToFitSeats(disp);
+            if (fitted.length > 0) newPoints = fitted;
+          }
+          return {
+            ...orig,
+            id: crypto.randomUUID(),
+            saved: false,
+            floor: activeFloorRef.current,
+            points: newPoints,
+            rows: newRows,
+            seats: newSeats,
+            tableMeta:   orig.tableMeta   ? { ...orig.tableMeta }   : undefined,
+            doorMeta:    orig.doorMeta    ? { ...orig.doorMeta }    : undefined,
+            stairsMeta:  orig.stairsMeta  ? { ...orig.stairsMeta }  : undefined,
+            labelOffset: orig.labelOffset ? { ...orig.labelOffset } : undefined,
+            iconOffset:  orig.iconOffset  ? { ...orig.iconOffset }  : undefined,
+          };
+        });
         setSections(prev => [...prev, ...newSections]);
         setMultiSelected(new Set(newSections.map(s => s.id)));
         if (newSections.length > 0) setSelected(newSections[0].id);
@@ -671,7 +755,7 @@ export function useMapEditorState({ mapId, svgViewBox, bgImageUrl, initialZones 
 
   const fitToContent = () => {
     if (!containerRef.current) return;
-    const secs = sectionsRef.current;
+    const secs = sectionsRef.current.filter(s => (s.floor ?? 1) === activeFloorRef.current);
     if (secs.length === 0) { resetZoom(); return; }
     let minX = Infinity, maxX = -Infinity, minY = Infinity, maxY = -Infinity;
     for (const s of secs) {
@@ -1143,8 +1227,24 @@ export function useMapEditorState({ mapId, svgViewBox, bgImageUrl, initialZones 
       const dx = e.clientX - startClientX, dy = e.clientY - startClientY;
       if (!hasDragged.current && Math.hypot(dx, dy) > 4) hasDragged.current = true;
       if (!hasDragged.current) return;
-      const sdx = dx / t.scale, sdy = dy / t.scale;
+      let sdx = dx / t.scale, sdy = dy / t.scale;
       const extraMap = new Map(extra.map(x => [x.id, x]));
+
+      // Snap-to-edge: align nearest bbox edges across all other sections
+      const snapThresh = 10 / t.scale;
+      const dragBBox = polyBBox(origPoints.map(p => ({ x: p.x + sdx, y: p.y + sdy })));
+      let bestX = snapThresh + 1, bestY = snapThresh + 1, sdxSnap = 0, sdySnap = 0;
+      for (const other of sectionsRef.current) {
+        if (other.id === sectionId || extraMap.has(other.id)) continue;
+        const ob = polyBBox(other.points);
+        for (const d of [dragBBox.minX - ob.minX, dragBBox.minX - ob.maxX, dragBBox.maxX - ob.minX, dragBBox.maxX - ob.maxX])
+          if (Math.abs(d) < bestX) { bestX = Math.abs(d); sdxSnap = d; }
+        for (const d of [dragBBox.minY - ob.minY, dragBBox.minY - ob.maxY, dragBBox.maxY - ob.minY, dragBBox.maxY - ob.maxY])
+          if (Math.abs(d) < bestY) { bestY = Math.abs(d); sdySnap = d; }
+      }
+      if (bestX <= snapThresh) sdx -= sdxSnap;
+      if (bestY <= snapThresh) sdy -= sdySnap;
+
       setSections(prev => prev.map(s => {
         if (s.id === sectionId) return { ...s, points: origPoints.map(p => ({ x: p.x + sdx, y: p.y + sdy })), seats: origSeats.map(seat => ({ ...seat, x: seat.x + sdx, y: seat.y + sdy })) };
         const ex = extraMap.get(s.id);
@@ -1537,7 +1637,7 @@ export function useMapEditorState({ mapId, svgViewBox, bgImageUrl, initialZones 
         pushHistory();
         setSections(prev => [...prev, {
           id, name: `Table ${tableNum}`, label: `T${tableNum}`,
-          sectionType: "TABLE", points: pts, saved: false, edgeCurve: 0, tableMeta: meta,
+          sectionType: "TABLE", points: pts, saved: false, edgeCurve: 0, tableMeta: meta, floor: activeFloorRef.current,
         }]);
         setSelected(id);
         setTool("select");
@@ -1565,7 +1665,7 @@ export function useMapEditorState({ mapId, svgViewBox, bgImageUrl, initialZones 
           setSections(p => [...p, {
             id, name: `Text ${textNum}`, label: `Text ${textNum}`,
             sectionType: "TEXT" as DraftSection["sectionType"],
-            points: pts, saved: false, edgeCurve: 0,
+            points: pts, saved: false, edgeCurve: 0, floor: activeFloorRef.current,
             textColor: "#ffffff", labelSize: 18,
           }]);
           setSelected(id);
@@ -1574,11 +1674,11 @@ export function useMapEditorState({ mapId, svgViewBox, bgImageUrl, initialZones 
           hasDragged.current = false; return;
         }
 
-        if (toolRef.current === "polygon" || toolRef.current === "object") {
+        if (toolRef.current === "polygon" || toolRef.current === "object" || toolRef.current === "track") {
           const pt = clientToSvg(e.clientX, e.clientY);
           const d = drawingRef.current;
 
-          if (d.length >= 2 && Math.hypot(pt.x - d[0].x, pt.y - d[0].y) < 20 / t.scale) {
+          if (toolRef.current !== "track" && d.length >= 2 && Math.hypot(pt.x - d[0].x, pt.y - d[0].y) < 20 / t.scale) {
             finishPolygon(); hasDragged.current = false; return;
           }
           setDrawing(prev => [...prev, pt]);
@@ -1593,6 +1693,7 @@ export function useMapEditorState({ mapId, svgViewBox, bgImageUrl, initialZones 
 
   const handleDoubleClick = (e: React.MouseEvent<HTMLDivElement>) => {
     if (toolRef.current === "polygon" || toolRef.current === "object") { finishPolygon(); return; }
+    if (toolRef.current === "track") { finishTrack(); return; }
     const target = e.target as Element;
     // Double-click on a seat → open seat editor
     const seatEl = target.closest("[data-seat-id]") as HTMLElement | null;
@@ -1644,7 +1745,7 @@ export function useMapEditorState({ mapId, svgViewBox, bgImageUrl, initialZones 
       label: isObj ? objName : `S${p.length + 1}`,
       sectionType: "GA" as DraftSection["sectionType"],
       customSvg: isObj ? (objectDraftSvgRef.current ?? "none") : undefined,
-      points: [...d], saved: false, edgeCurve: 0,
+      points: [...d], saved: false, edgeCurve: 0, floor: activeFloorRef.current,
     }]);
     setDrawing([]);
     setSelected(id);
@@ -1655,12 +1756,28 @@ export function useMapEditorState({ mapId, svgViewBox, bgImageUrl, initialZones 
     }
   };
 
+  const finishTrack = () => {
+    const d = drawingRef.current;
+    if (d.length < 2) { setDrawing([]); setTool("select"); return; }
+    pushHistory();
+    const id = crypto.randomUUID();
+    setSections(p => [...p, {
+      id, name: "Track", label: "Track",
+      sectionType: "TRACK" as DraftSection["sectionType"],
+      points: [...d], saved: false, edgeCurve: 0, floor: activeFloorRef.current,
+    }]);
+    setDrawing([]);
+    setSelected(id);
+    setTool("select");
+  };
+
   // ── Section save ──────────────────────────────────────────────────────
   const saveSection = async (s: DraftSection) => {
     setSaving(true);
     try {
       const body: Record<string, unknown> = {
         name: s.name, label: s.label, sectionType: s.sectionType, polygonPath: pointsToPath(s.points),
+        floor: s.floor ?? 1,
       };
       if (s.sectionType === "DOOR" && s.doorMeta) {
         const n: Record<string, unknown> = { w: s.doorMeta.w, h: s.doorMeta.h, angle: s.doorMeta.angle };
@@ -1792,7 +1909,7 @@ export function useMapEditorState({ mapId, svgViewBox, bgImageUrl, initialZones 
         method: "POST", headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
           name: `Section ${secNum}`, label: `S${secNum}`,
-          sectionType: "RESERVED",
+          sectionType: "RESERVED", floor: activeFloor,
           polygonPath: pointsToPath([origin, { x: origin.x + 1, y: origin.y }, { x: origin.x + 1, y: origin.y + 1 }, { x: origin.x, y: origin.y + 1 }]),
         }),
       });
@@ -1826,7 +1943,7 @@ export function useMapEditorState({ mapId, svgViewBox, bgImageUrl, initialZones 
       });
       setSections(prev => [...prev, {
         id: sectionId, name: `Section ${secNum}`, label: `S${secNum}`,
-        sectionType: "RESERVED", points: newPoints, saved: true, edgeCurve: 0,
+        sectionType: "RESERVED", points: newPoints, saved: true, edgeCurve: 0, floor: activeFloor,
         seats: newSeats, rows: newRows,
       }]);
       setSelected(sectionId);
@@ -2048,7 +2165,7 @@ export function useMapEditorState({ mapId, svgViewBox, bgImageUrl, initialZones 
       });
       if (!res.ok) return;
       const map = await fetch(`/api/maps/${mapId}`).then(r => r.json()) as {
-        sections: { id: string; name: string; label: string; sectionType: DraftSection["sectionType"]; polygonPath: string; notes?: string | null; zoneMappings: { zoneId: string }[]; rows: { id: string; label: string; curve?: number; skew?: number; seats: { id: string; x: number; y: number; seatNumber: string; notes?: string | null }[] }[] }[];
+        sections: { id: string; name: string; label: string; sectionType: DraftSection["sectionType"]; polygonPath: string; notes?: string | null; floor?: number; zoneMappings: { zoneId: string }[]; rows: { id: string; label: string; curve?: number; skew?: number; seats: { id: string; x: number; y: number; seatNumber: string; notes?: string | null }[] }[] }[];
         pricingZones: Zone[]; mapHolds?: MapHold[];
       };
       setSections(map.sections.map(s => {
@@ -2076,6 +2193,7 @@ export function useMapEditorState({ mapId, svgViewBox, bgImageUrl, initialZones 
         }
         return {
           id: s.id, name: s.name, label: s.label, sectionType: s.sectionType,
+          floor: s.floor ?? 1,
           zoneId: s.zoneMappings[0]?.zoneId, saved: true, edgeCurve,
           capacity, maxPerOrder, hideSeats, customSvg, customColor, noOrphanSeats,
           tableMeta, iconOffset, labelOffset, iconSize, labelSize,
@@ -2138,7 +2256,7 @@ export function useMapEditorState({ mapId, svgViewBox, bgImageUrl, initialZones 
           const meta = s.tableMeta;
           const res = await fetch(`/api/maps/${mapId}/sections`, {
             method: "POST", headers: { "Content-Type": "application/json" },
-            body: JSON.stringify({ name: s.name, label: s.label, sectionType: "TABLE", polygonPath: pointsToPath(s.points), notes: JSON.stringify(meta) }),
+            body: JSON.stringify({ name: s.name, label: s.label, sectionType: "TABLE", polygonPath: pointsToPath(s.points), notes: JSON.stringify(meta), floor: s.floor ?? 1 }),
           });
           const savedSec = await res.json();
           const realId: string = savedSec.id;
@@ -2166,6 +2284,7 @@ export function useMapEditorState({ mapId, svgViewBox, bgImageUrl, initialZones 
           const body: Record<string, unknown> = {
             name: s.name, label: s.label, sectionType: s.sectionType,
             polygonPath: pointsToPath(s.points),
+            floor: s.floor ?? 1,
           };
           if (s.sectionType === "DOOR" && s.doorMeta) {
             const n: Record<string, unknown> = { w: s.doorMeta.w, h: s.doorMeta.h, angle: s.doorMeta.angle };
@@ -2232,36 +2351,52 @@ export function useMapEditorState({ mapId, svgViewBox, bgImageUrl, initialZones 
               return {
                 label: row.label,
                 startX: rSeats[0]?.x ?? 0, startY: rSeats[0]?.y ?? 0,
+                curve: row.curve ?? 0, skew: row.skew ?? 0,
                 seats: rSeats.map(seat => ({ seatNumber: seat.seatNumber, x: seat.x, y: seat.y })),
               };
             });
-            type PasteRow = { id: string; label: string; seats: { id: string; x: number; y: number; seatNumber: string }[] };
+            type PasteRow = { id: string; label: string; curve?: number; skew?: number; seats: { id: string; x: number; y: number; seatNumber: string }[] };
             const pasteCreated = await fetch(`/api/sections/${realId}/rows/batch`, {
               method: "POST", headers: { "Content-Type": "application/json" },
               body: JSON.stringify({ rows: pasteRowsPayload }),
             }).then(r => r.json()) as PasteRow[];
-            const finalRows: RowInfo[] = [];
-            const finalSeats: SeatDot[] = [];
+            // Build UUID remapping: client temp UUID → real DB UUID
+            // (positions are NOT taken from DB — section may have been dragged while saving)
+            const rowUUIDMap = new Map<string, string>();   // clientRowId → dbRowId
+            const seatUUIDMap = new Map<string, string>();  // clientSeatId → dbSeatId
+            const rowMetaMap = new Map<string, { curve: number; skew: number }>();
             pasteCreated.forEach((savedRow, ri) => {
               const origRow = s.rows![ri];
+              rowUUIDMap.set(origRow.id, savedRow.id);
+              rowMetaMap.set(savedRow.id, { curve: savedRow.curve ?? origRow.curve, skew: savedRow.skew ?? origRow.skew });
               const rSeats = rowMap.get(origRow.id) ?? [];
-              finalRows.push({ id: savedRow.id, label: savedRow.label, curve: origRow.curve, skew: origRow.skew });
               savedRow.seats.forEach((seat, i) => {
-                finalSeats.push({
-                  id: seat.id, x: seat.x, y: seat.y,
-                  seatNumber: seat.seatNumber, rowLabel: savedRow.label, rowId: savedRow.id,
-                  shape: rSeats[i]?.shape,
-                });
+                if (rSeats[i]) seatUUIDMap.set(rSeats[i].id, seat.id);
               });
             });
-            setSections(prev => prev.map(sec => sec.id === realId ? { ...sec, rows: finalRows, seats: finalSeats } : sec));
+            // Remap IDs on current section state — preserves positions from any drag that occurred
+            setSections(prev => prev.map(sec => {
+              if (sec.id !== realId) return sec;
+              const updatedRows = (sec.rows ?? []).map(row => {
+                const dbRowId = rowUUIDMap.get(row.id);
+                if (!dbRowId) return row;
+                const meta = rowMetaMap.get(dbRowId);
+                return { ...row, id: dbRowId, ...(meta ?? {}) };
+              });
+              const updatedSeats = (sec.seats ?? []).map(seat => {
+                const dbSeatId = seatUUIDMap.get(seat.id);
+                const dbRowId = rowUUIDMap.get(seat.rowId);
+                return { ...seat, ...(dbSeatId ? { id: dbSeatId } : {}), ...(dbRowId ? { rowId: dbRowId } : {}) };
+              });
+              return { ...sec, rows: updatedRows, seats: updatedSeats };
+            }));
           }
         }
       } catch (e) {
         console.error("Failed to save pasted section", e);
       }
     }
-    // Update multiSelected and selected to use real IDs
+    // Update multiSelected, selected, and focusedSection to use real IDs
     if (idMap.size > 0) {
       setMultiSelected(prev => {
         const next = new Set<string>();
@@ -2269,6 +2404,7 @@ export function useMapEditorState({ mapId, svgViewBox, bgImageUrl, initialZones 
         return next;
       });
       setSelected(prev => prev ? (idMap.get(prev) ?? prev) : prev);
+      setFocused(prev => prev ? (idMap.get(prev) ?? prev) : prev);
     }
   };
 
@@ -2490,7 +2626,7 @@ export function useMapEditorState({ mapId, svgViewBox, bgImageUrl, initialZones 
       const mapRes = await fetch(`/api/maps/${mapId}`);
       if (mapRes.ok) {
         const fresh = await mapRes.json() as {
-          sections: { id: string; name: string; label: string; sectionType: DraftSection["sectionType"]; polygonPath: string; notes?: string | null; zoneMappings: { zoneId: string }[]; rows: { id: string; label: string; curve?: number; skew?: number; seats: { id: string; x: number; y: number; seatNumber: string; notes?: string | null }[] }[] }[];
+          sections: { id: string; name: string; label: string; sectionType: DraftSection["sectionType"]; polygonPath: string; notes?: string | null; floor?: number; zoneMappings: { zoneId: string }[]; rows: { id: string; label: string; curve?: number; skew?: number; seats: { id: string; x: number; y: number; seatNumber: string; notes?: string | null }[] }[] }[];
           pricingZones: Zone[];
           mapHolds?: MapHold[];
         };
@@ -2520,6 +2656,7 @@ export function useMapEditorState({ mapId, svgViewBox, bgImageUrl, initialZones 
           return {
             id: s.id, name: s.name, label: s.label,
             sectionType: s.sectionType,
+            floor: s.floor ?? 1,
             zoneId: s.zoneMappings[0]?.zoneId,
             saved: true,
             edgeCurve: 0,
@@ -2564,7 +2701,7 @@ export function useMapEditorState({ mapId, svgViewBox, bgImageUrl, initialZones 
     }
   };
 
-  const canvasCursor = (seatDragState.current || sectionDragState.current) ? "grabbing" : (tool === "polygon" || tool === "table" || tool === "object" || tool === "text") ? "crosshair" : "grab";
+  const canvasCursor = (seatDragState.current || sectionDragState.current) ? "grabbing" : (tool === "polygon" || tool === "table" || tool === "object" || tool === "text" || tool === "track") ? "crosshair" : "grab";
 
   return {
     // State
@@ -2582,6 +2719,7 @@ export function useMapEditorState({ mapId, svgViewBox, bgImageUrl, initialZones 
     activeHoldId, setActiveHoldId,
     holdEditDraft, setHoldEditDraft,
     loading,
+    activeFloor, floorNames, switchFloor, addFloor, renameFloor, deleteFloor,
     sidebarTab, setSidebarTab,
     showRows, setShowRows,
     saving, setSaving,
@@ -2656,6 +2794,7 @@ export function useMapEditorState({ mapId, svgViewBox, bgImageUrl, initialZones 
     handleDoubleClick,
     handleMouseLeave,
     finishPolygon,
+    finishTrack,
     saveSection,
     generateRows,
     createSeatedSection,

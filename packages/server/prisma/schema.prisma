@@ -45,6 +45,7 @@ model VenueMap {
   isPublished      Boolean   @default(false)
   scheduledStartAt DateTime?
   scheduledEndAt   DateTime?
+  floorNames       String?
   createdAt        DateTime  @default(now())
   updatedAt        DateTime  @updatedAt
   sections         Section[]
@@ -61,6 +62,7 @@ model Section {
   polygonPath  String
   notes        String?
   sortOrder    Int         @default(0)
+  floor        Int         @default(1)
   createdAt    DateTime    @default(now())
   updatedAt    DateTime    @updatedAt
   map          VenueMap    @relation(fields: [mapId], references: [id], onDelete: Cascade)

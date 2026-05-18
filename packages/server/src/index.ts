@@ -59,6 +59,7 @@ const UpsertSectionSchema = z.object({
   polygonPath: z.string(),
   notes: z.string().optional(),
   sortOrder: z.number().int().optional(),
+  floor: z.number().int().min(1).optional(),
 });
 const CreateZoneSchema = z.object({
   name: z.string(),
@@ -232,6 +233,17 @@ app.patch("/api/maps/:mapId/schedule", ah(async (req, res) => {
   if (isPublished      !== undefined) data.isPublished = isPublished;
   if (Object.keys(data).length === 0) return err(res, 400, "Nothing to update");
   res.json(await prisma.venueMap.update({ where: { id: req.params.mapId }, data }));
+}));
+
+// Update floor names JSON on a map
+app.patch("/api/maps/:mapId/floor-names", ah(async (req, res) => {
+  const { floorNames } = req.body as { floorNames: Record<string, string> };
+  if (!floorNames || typeof floorNames !== "object") return err(res, 400, "floorNames required");
+  const updated = await prisma.venueMap.update({
+    where: { id: req.params.mapId },
+    data: { floorNames: JSON.stringify(floorNames) },
+  });
+  res.json({ floorNames: updated.floorNames });
 }));
 
 // ── Sections ──────────────────────────────────────────────────────────────
@@ -762,7 +774,7 @@ app.post("/api/sections/:sectionId/rows", ah(async (req, res) => {
 // Batch-create multiple rows + seats in one transaction, returns rows with DB-assigned IDs
 app.post("/api/sections/:sectionId/rows/batch", ah(async (req, res) => {
   const { rows } = req.body as {
-    rows: { label: string; startX: number; startY: number; angle?: number;
+    rows: { label: string; startX: number; startY: number; angle?: number; curve?: number; skew?: number;
             seats: { seatNumber: string; x: number; y: number }[] }[]
   };
   if (!Array.isArray(rows) || rows.length === 0) return err(res, 400, "rows required");
@@ -771,6 +783,7 @@ app.post("/api/sections/:sectionId/rows/batch", ah(async (req, res) => {
       data: {
         sectionId: req.params.sectionId,
         label: row.label, startX: row.startX, startY: row.startY, angle: row.angle ?? 0,
+        curve: row.curve ?? 0, skew: row.skew ?? 0,
         seats: row.seats.length > 0 ? { create: row.seats } : undefined,
       },
       include: { seats: true },

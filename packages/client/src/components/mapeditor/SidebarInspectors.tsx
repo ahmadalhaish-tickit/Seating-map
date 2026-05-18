@@ -15,6 +15,7 @@ export function SidebarInspectors() {
     rowCfg, setRowCfg, seatedPlacement, setSeatedPlacement, createSeatedSection,
     showRows, setShowRows, generateRows,
     multiSelected, selectedSeats, splitSection, mergeSections,
+    floorNames, renameFloor, deleteFloor,
   } = useMapEditorContext();
 
   return (
@@ -74,10 +75,25 @@ export function SidebarInspectors() {
               ))}
             </select>
           </label>
+          <label style={{ display: "block", marginBottom: 8 }}>
+            <span style={{ fontSize: 12, color: "#666", display: "block", marginBottom: 3 }}>Seating side</span>
+            <select value={tableCfg.sides ?? "all"} onChange={e => setTableCfg(p => ({ ...p, sides: e.target.value as "all" | "one" }))} style={inp}>
+              <option value="all">All sides</option>
+              <option value="one">One side (banquet)</option>
+            </select>
+          </label>
           {(tableCfg.shape === "round" || tableCfg.shape === "oval") ? (
             <label style={{ display: "block", marginBottom: 8 }}>
-              <span style={{ fontSize: 12, color: "#666", display: "block", marginBottom: 3 }}>Total chairs</span>
+              <span style={{ fontSize: 12, color: "#666", display: "block", marginBottom: 3 }}>
+                {tableCfg.sides === "one" ? "Front chairs" : "Total chairs"}
+              </span>
               <input type="number" value={tableCfg.cpl} min={0} max={20}
+                onChange={e => setTableCfg(p => ({ ...p, cpl: Number(e.target.value) }))} style={inp} />
+            </label>
+          ) : tableCfg.sides === "one" ? (
+            <label style={{ display: "block", marginBottom: 8 }}>
+              <span style={{ fontSize: 12, color: "#666", display: "block", marginBottom: 3 }}>Front chairs</span>
+              <input type="number" value={tableCfg.cpl} min={0} max={12}
                 onChange={e => setTableCfg(p => ({ ...p, cpl: Number(e.target.value) }))} style={inp} />
             </label>
           ) : (
@@ -124,6 +140,14 @@ export function SidebarInspectors() {
               ))}
             </select>
           </label>
+          <label style={{ display: "block", marginBottom: 8 }}>
+            <span style={{ fontSize: 12, color: "#666", display: "block", marginBottom: 3 }}>Seating side</span>
+            <select value={sel.tableMeta.sides ?? "all"} style={inp}
+              onChange={e => updateTableMeta(sel.id, { sides: e.target.value as "all" | "one" })}>
+              <option value="all">All sides</option>
+              <option value="one">One side (banquet)</option>
+            </select>
+          </label>
           <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 8, marginBottom: 8 }}>
             <label>
               <span style={{ fontSize: 12, color: "#666", display: "block", marginBottom: 3 }}>Width</span>
@@ -138,8 +162,16 @@ export function SidebarInspectors() {
           </div>
           {(sel.tableMeta.shape === "round" || sel.tableMeta.shape === "oval") ? (
             <label style={{ display: "block", marginBottom: 8 }}>
-              <span style={{ fontSize: 12, color: "#666", display: "block", marginBottom: 3 }}>Total chairs</span>
+              <span style={{ fontSize: 12, color: "#666", display: "block", marginBottom: 3 }}>
+                {sel.tableMeta.sides === "one" ? "Front chairs" : "Total chairs"}
+              </span>
               <input type="number" value={sel.tableMeta.cpl} min={0} max={24} style={inp}
+                onChange={e => updateTableMeta(sel.id, { cpl: Number(e.target.value) })} />
+            </label>
+          ) : sel.tableMeta.sides === "one" ? (
+            <label style={{ display: "block", marginBottom: 8 }}>
+              <span style={{ fontSize: 12, color: "#666", display: "block", marginBottom: 3 }}>Front chairs</span>
+              <input type="number" value={sel.tableMeta.cpl} min={0} max={12} style={inp}
                 onChange={e => updateTableMeta(sel.id, { cpl: Number(e.target.value) })} />
             </label>
           ) : (
@@ -557,6 +589,20 @@ export function SidebarInspectors() {
                 style={inp} />
             </label>
           ))}
+          {Object.keys(floorNames).length > 1 && (
+            <label style={{ display: "block", marginBottom: 8 }}>
+              <span style={{ fontSize: 12, color: "#666", display: "block", marginBottom: 3 }}>Floor</span>
+              <select value={sel.floor ?? 1} style={inp} onChange={e => {
+                const f = +e.target.value;
+                upd(sel.id, { floor: f });
+                if (sel.saved) saveSectionPatch(sel.id, { floor: f });
+              }}>
+                {Object.entries(floorNames).sort(([a], [b]) => +a - +b).map(([num, name]) => (
+                  <option key={num} value={num}>{name}</option>
+                ))}
+              </select>
+            </label>
+          )}
           <label style={{ display: "block", marginBottom: 8 }}>
             <span style={{ fontSize: 12, color: "#666", display: "block", marginBottom: 3 }}>Label size</span>
             <input type="number" min={6} max={48} step={1}

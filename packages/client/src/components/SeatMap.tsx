@@ -16,24 +16,26 @@ interface Seat {
 }
 interface Row { id: string; label: string; curve: number; skew: number; seats: Seat[]; }
 interface PricingZone { id: string; name: string; color: string; sortOrder: number; }
-type VenueObjectType = "STAGE"|"BAR"|"BATHROOM"|"DANCING"|"PARKING"|"STAIRS"|"WALL"|"DOOR"|"CHECKIN"|"TEXT";
+type VenueObjectType = "STAGE"|"BAR"|"BATHROOM"|"DANCING"|"PARKING"|"STAIRS"|"WALL"|"DOOR"|"CHECKIN"|"TEXT"|"TRACK";
 const VENUE_OBJECT_COLORS: Record<VenueObjectType, string> = {
   STAGE:"#C49A3C", BAR:"#A0522D", BATHROOM:"#4A90D9", DANCING:"#9B59B6",
-  PARKING:"#27AE60", STAIRS:"#7F8C8D", WALL:"#555566", DOOR:"#E67E22", CHECKIN:"#E74C3C", TEXT:"#ffffff",
+  PARKING:"#27AE60", STAIRS:"#7F8C8D", WALL:"#555566", DOOR:"#E67E22", CHECKIN:"#E74C3C", TEXT:"#ffffff", TRACK:"#222233",
 };
-const VENUE_OBJECT_TYPES = new Set<string>(["STAGE","BAR","BATHROOM","DANCING","PARKING","STAIRS","WALL","DOOR","CHECKIN","TEXT"]);
+const VENUE_OBJECT_TYPES = new Set<string>(["STAGE","BAR","BATHROOM","DANCING","PARKING","STAIRS","WALL","DOOR","CHECKIN","TEXT","TRACK"]);
 
 interface Section {
   id: string; name: string; label: string;
   sectionType: "RESERVED"|"GA"|"ACCESSIBLE"|"RESTRICTED"|"TABLE"|VenueObjectType;
   polygonPath: string;
   notes?: string | null;
+  floor?: number;
   rows: Row[];
   zoneMappings: { zoneId: string }[];
 }
 interface MapHold { id: string; name: string; color: string; seats: { seatId: string }[] }
 interface FullMap {
   id: string; svgViewBox: string; bgImageUrl?: string;
+  floorNames?: string | null;
   sections: Section[];
   pricingZones: PricingZone[];
   mapHolds: MapHold[];
@@ -87,6 +89,20 @@ function curvedPath(pts: Point[], curve: number): string {
     const dx = p2.x - p1.x, dy = p2.y - p1.y;
     const len = Math.hypot(dx, dy) || 1;
     d += ` Q ${mx + curve * (-dy / len)} ${my + curve * (dx / len)} ${p2.x} ${p2.y}`;
+  }
+  return d;
+}
+
+function catmullRomSVG(pts: { x: number; y: number }[]): string {
+  if (pts.length < 2) return "";
+  if (pts.length === 2) return `M ${pts[0].x} ${pts[0].y} L ${pts[1].x} ${pts[1].y}`;
+  const ext = [pts[0], ...pts, pts[pts.length - 1]];
+  let d = `M ${pts[0].x} ${pts[0].y}`;
+  for (let i = 0; i < pts.length - 1; i++) {
+    const p0 = ext[i], p1 = ext[i + 1], p2 = ext[i + 2], p3 = ext[i + 3];
+    const cp1x = p1.x + (p2.x - p0.x) / 6, cp1y = p1.y + (p2.y - p0.y) / 6;
+    const cp2x = p2.x - (p3.x - p1.x) / 6, cp2y = p2.y - (p3.y - p1.y) / 6;
+    d += ` C ${cp1x} ${cp1y} ${cp2x} ${cp2y} ${p2.x} ${p2.y}`;
   }
   return d;
 }
@@ -293,6 +309,9 @@ export default function SeatMap({ mapId, eventId, sessionId, onSelectionChange }
   const [gaPopup, setGaPopup] = useState<{ sectionId: string; sectionName: string; capacity?: number; maxPerOrder?: number; zoneName?: string; zoneColor?: string; qty: number; x: number; y: number } | null>(null);
   const gaSelectionsRef = useRef<Record<string, number>>({});
   useEffect(() => { gaSelectionsRef.current = gaSelections; }, [gaSelections]);
+  const [activeFloor, setActiveFloor] = useState(1);
+  const activeFloorRef = useRef(1);
+  useEffect(() => { activeFloorRef.current = activeFloor; }, [activeFloor]);
   const [expandedSections, setExpandedSections] = useState<Set<string>>(new Set());
   const [transform, setTransform] = useState({ x: 0, y: 0, scale: 1 });
   const [toast, setToast] = useState<{ msg: string; type: "warn" | "error" } | null>(null);
@@ -408,7 +427,7 @@ export default function SeatMap({ mapId, eventId, sessionId, onSelectionChange }
   const fitToContent = useCallback(() => {
     if (!mapData || !containerRef.current) return;
     let minX = Infinity, maxX = -Infinity, minY = Infinity, maxY = -Infinity;
-    for (const section of mapData.sections) {
+    for (const section of mapData.sections.filter(s => (s.floor ?? 1) === activeFloorRef.current)) {
       for (const p of pathPoints(section.polygonPath)) {
         if (p.x < minX) minX = p.x; if (p.x > maxX) maxX = p.x;
         if (p.y < minY) minY = p.y; if (p.y > maxY) maxY = p.y;
@@ -530,6 +549,17 @@ export default function SeatMap({ mapId, eventId, sessionId, onSelectionChange }
 
   const [,,vw,vh] = mapData.svgViewBox.split(" ").map(Number);
 
+  const parsedFloorNames: Record<string, string> = mapData.floorNames ? JSON.parse(mapData.floorNames) : {};
+  const floorList = [...new Set(mapData.sections.map(s => s.floor ?? 1))].sort().map(num => ({
+    num,
+    name: parsedFloorNames[num] ?? (num === 1 ? "Main Floor" : num === 2 ? "Balcony" : `Floor ${num}`),
+    available: mapData.sections
+      .filter(s => (s.floor ?? 1) === num)
+      .flatMap(s => s.rows.flatMap(r => r.seats))
+      .filter(seat => (inventory[seat.id] ?? "AVAILABLE") === "AVAILABLE" && seatZoneMap.get(seat.id) !== undefined)
+      .length,
+  }));
+
   return (
     <div ref={containerRef} style={{ width:"100%", height:"100%", overflow:"hidden", position:"relative", cursor:"grab", touchAction:"none" }}>
       <style>{`@keyframes fadeInDown{from{opacity:0;transform:translate(-50%,-8px)}to{opacity:1;transform:translate(-50%,0)}}`}</style>
@@ -540,11 +570,43 @@ export default function SeatMap({ mapId, eventId, sessionId, onSelectionChange }
       }}>
         {mapData.bgImageUrl && <image href={mapData.bgImageUrl} x="0" y="0" width={vw} height={vh} />}
 
+        {/* ── Ghost floors (non-active floors shown dimmed behind) ── */}
+        {floorList.length > 1 && mapData.sections
+          .filter(s => (s.floor ?? 1) !== activeFloor)
+          .map(section => {
+            if (section.sectionType === "TEXT") return null;
+            if (section.sectionType === "TRACK") {
+              const pts = pathPoints(section.polygonPath);
+              if (pts.length < 2) return null;
+              return <path key={section.id} d={catmullRomSVG(pts)} fill="none" stroke="#555" strokeWidth={3} strokeLinecap="round" strokeLinejoin="round" opacity={0.13} style={{ pointerEvents: "none" }} />;
+            }
+            if (section.sectionType === "WALL") {
+              const nums = section.polygonPath.match(/-?\d+\.?\d*/g)?.map(Number) ?? [];
+              if (nums.length < 4) return null;
+              return <line key={section.id} x1={nums[0]} y1={nums[1]} x2={nums[2]} y2={nums[3]} stroke="#555" strokeWidth={4} strokeLinecap="round" opacity={0.13} style={{ pointerEvents: "none" }} />;
+            }
+            return (
+              <path key={section.id} d={section.polygonPath} fill="#999" stroke="#666" strokeWidth={0.5} opacity={0.1} style={{ pointerEvents: "none" }} />
+            );
+          })
+        }
+
         {/* ── Venue objects (behind everything) ── */}
-        {mapData.sections.filter(s => VENUE_OBJECT_TYPES.has(s.sectionType)).map(section => {
+        {mapData.sections.filter(s => VENUE_OBJECT_TYPES.has(s.sectionType) && (s.floor ?? 1) === activeFloor).map(section => {
           const color = VENUE_OBJECT_COLORS[section.sectionType as VenueObjectType];
           let notes: Record<string, unknown> = {};
           try { notes = JSON.parse(section.notes ?? "{}"); } catch {}
+
+          // TRACK — smooth catmull-rom curve line
+          if (section.sectionType === "TRACK") {
+            const pts = pathPoints(section.polygonPath);
+            if (pts.length < 2) return null;
+            return (
+              <g key={section.id} style={{ pointerEvents: "none" }}>
+                <path d={catmullRomSVG(pts)} fill="none" stroke={color} strokeWidth={4} strokeLinecap="round" strokeLinejoin="round" />
+              </g>
+            );
+          }
 
           // WALL — line
           if (section.sectionType === "WALL") {
@@ -657,7 +719,7 @@ export default function SeatMap({ mapId, eventId, sessionId, onSelectionChange }
         })}
 
         {/* ── TABLE sections ── */}
-        {mapData.sections.filter(s => s.sectionType === "TABLE").map(section => {
+        {mapData.sections.filter(s => s.sectionType === "TABLE" && (s.floor ?? 1) === activeFloor).map(section => {
           const zone = zoneForSection(section);
           const color = zone?.color ?? "#888780";
           let meta: TableMeta = { shape: "rectangle", w: 120, h: 60, cpl: 4, cps: 2, angle: 0 };
@@ -743,7 +805,7 @@ export default function SeatMap({ mapId, eventId, sessionId, onSelectionChange }
 
         {/* ── Seating + GA sections ── */}
         {mapData.sections
-          .filter(s => !VENUE_OBJECT_TYPES.has(s.sectionType) && s.sectionType !== "TABLE")
+          .filter(s => !VENUE_OBJECT_TYPES.has(s.sectionType) && s.sectionType !== "TABLE" && (s.floor ?? 1) === activeFloor)
           .map(section => {
             const zone = zoneForSection(section);
             const color = zone?.color ?? "#888780";
@@ -1056,6 +1118,63 @@ export default function SeatMap({ mapId, eventId, sessionId, onSelectionChange }
           )}
         </div>
       )}
+
+      {/* Floor switcher — vertical elevator-style panel, only when multiple floors */}
+      {floorList.length > 1 && (() => {
+        const sortedFloors = [...floorList].sort((a, b) => b.num - a.num); // highest first (elevator metaphor)
+        const activeIdx = sortedFloors.findIndex(f => f.num === activeFloor);
+        const switchTo = (num: number) => { setActiveFloor(num); activeFloorRef.current = num; requestAnimationFrame(fitToContent); };
+        return (
+          <div style={{
+            position:"absolute", right:16, top:"50%", transform:"translateY(-50%)",
+            display:"flex", flexDirection:"column", gap:4, zIndex:10,
+            background:"rgba(255,255,255,0.97)", borderRadius:14, padding:"6px",
+            boxShadow:"0 4px 20px rgba(0,0,0,0.14)", border:"1px solid #e8e8e8",
+          }}>
+            {/* Up arrow */}
+            <button onClick={() => activeIdx > 0 && switchTo(sortedFloors[activeIdx - 1].num)}
+              disabled={activeIdx <= 0}
+              style={{ width:36, height:28, borderRadius:8, border:"1px solid #e8e8e8", background:"transparent",
+                color: activeIdx <= 0 ? "#ddd" : "#555", cursor: activeIdx <= 0 ? "default" : "pointer",
+                fontSize:14, display:"flex", alignItems:"center", justifyContent:"center" }}>
+              ▲
+            </button>
+            {/* Floor buttons — highest at top */}
+            {sortedFloors.map(({ num, name, available }) => {
+              const isActive = num === activeFloor;
+              return (
+                <button key={num} onClick={() => switchTo(num)} style={{
+                  width:36, padding:"8px 0", borderRadius:8, cursor:"pointer",
+                  border: isActive ? "2px solid #534AB7" : "1px solid #e8e8e8",
+                  background: isActive ? "#534AB7" : "#f7f7f9",
+                  display:"flex", flexDirection:"column", alignItems:"center", gap:2,
+                  transition:"all 0.15s",
+                }}>
+                  <span style={{ fontSize:11, fontWeight: isActive ? 700 : 500, color: isActive ? "#fff" : "#333", lineHeight:1.1 }}>
+                    {num}
+                  </span>
+                  <span style={{ fontSize:9, color: isActive ? "#c4baff" : "#999", lineHeight:1 }}>
+                    {available}
+                  </span>
+                </button>
+              );
+            })}
+            {/* Down arrow */}
+            <button onClick={() => activeIdx < sortedFloors.length - 1 && switchTo(sortedFloors[activeIdx + 1].num)}
+              disabled={activeIdx >= sortedFloors.length - 1}
+              style={{ width:36, height:28, borderRadius:8, border:"1px solid #e8e8e8", background:"transparent",
+                color: activeIdx >= sortedFloors.length - 1 ? "#ddd" : "#555",
+                cursor: activeIdx >= sortedFloors.length - 1 ? "default" : "pointer",
+                fontSize:14, display:"flex", alignItems:"center", justifyContent:"center" }}>
+              ▼
+            </button>
+            {/* Floor name label */}
+            <div style={{ textAlign:"center", fontSize:9, color:"#aaa", paddingTop:2, lineHeight:1.2 }}>
+              {floorList.find(f => f.num === activeFloor)?.name}
+            </div>
+          </div>
+        );
+      })()}
 
       {/* Zoom controls */}
       <div style={{ position:"absolute", bottom:16, right:16, display:"flex", flexDirection:"column", gap:6 }}>
